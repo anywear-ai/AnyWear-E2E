@@ -440,7 +440,6 @@ jobs:
     timeout-minutes: 90
     environment: beta
     permissions:
-      actions: read
       contents: read
       id-token: write
     env:
@@ -543,21 +542,6 @@ jobs:
         env:
           QUALIFICATION_EVIDENCE_PATH: deployment-evidence-before.json
         run: pnpm qualification:collect
-
-      # #228: the consumer-side drift gate. The deployment's smoke run observed the same
-      # platform; this step finds the newest deploy-smoke observation of this release
-      # among the 30 newest completed-success `workflow_dispatch` runs (the
-      # `tested-revisions-<run>-<attempt>` artifact), compares `{client, service,
-      # platform}` member by member, and refuses before the suite when a member differs
-      # or when no matching smoke observation exists. The compared smoke run is recorded
-      # in `.qualification-inputs/smoke-drift.json`, which the credential-free `record`
-      # job re-verifies against exactly the recorded artifact. Only `full` runs this
-      # gate; `smoke` and `reconcile` never do.
-      - name: Verify the deploy-smoke observation agrees with the qualification observation
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SMOKE_DRIFT_BASELINE: deployment-evidence-before.json
-        run: node scripts/verify-smoke-drift.mjs
 
       - name: Load Beta test identity configuration
         shell: bash
@@ -701,7 +685,6 @@ jobs:
             .qualification-inputs/service-release.json
             .qualification-inputs/beta-environment-before.json
             .qualification-inputs/beta-environment-after.json
-            .qualification-inputs/smoke-drift.json
             deployment-evidence-before.json
             deployment-evidence.json
             qualification-record.json
@@ -951,7 +934,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      actions: read
       contents: read
 
     steps:
@@ -973,15 +955,6 @@ jobs:
       - name: Verify the qualification record without credentials
         run: node scripts/verify-qualification-record.mjs
 
-      # #228: the credential-free half re-proves the drift gate instead of trusting the
-      # `full` job's claim: the recorded smoke run/attempt/artifact metadata is re-checked
-      # against the live API and the artifact is downloaded and compared again.
-      - name: Re-verify the deploy-smoke drift against the recorded artifact
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SMOKE_DRIFT_BASELINE: deployment-evidence-before.json
-        run: node scripts/verify-smoke-drift.mjs --verify-recorded
-
       - name: Attach the qualification evidence
         uses: actions/upload-artifact@v4
         with:
@@ -991,7 +964,6 @@ jobs:
             .qualification-inputs/service-release.json
             .qualification-inputs/beta-environment-before.json
             .qualification-inputs/beta-environment-after.json
-            .qualification-inputs/smoke-drift.json
             deployment-evidence-before.json
             deployment-evidence.json
             qualification-record.json

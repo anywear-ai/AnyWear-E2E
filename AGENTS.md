@@ -95,15 +95,15 @@ Run install and build commands from this repository.
   JSON and sha256 — not a cross-repository Infra checkout. No committed stage-parameter
   list remains; the committed surface is the stage path, the name prefixes, the account
   and the two observation regions (`scripts/platform-entrypoints.mjs`).
-- The consumer-side drift gate (#228) compares the deploy-time smoke observation with
-  the qualification observation of the same release. The `full` job finds the newest
-  deploy-smoke observation (Service commit + image digest + Client source commit) among
-  the 30 newest completed-success `workflow_dispatch` runs' `tested-revisions-<run>-<attempt>`
-  artifacts, compares `{client, service, platform}` member by member, and refuses a
-  differing member or a missing smoke before the suite. The compared smoke run is
-  recorded in `.qualification-inputs/smoke-drift.json` (an audit file, not a record
-  member), and the credential-free `record` job re-verifies it against exactly the
-  recorded artifact id. Only `full` runs the gate; `smoke` and `reconcile` never do.
+- The consumer-side drift gate is removed (#259): `full` no longer compares the deploy-smoke
+  observation with the qualification observation, and the gate script, the strict ZIP reader
+  it alone used and both their tests are deleted. `full` qualifies the tuple from its own
+  before-observation, the release-gating suite and the after-observation, and the
+  credential-free `record` job verifies only the v4 record. The removal follows decision
+  D2(c) of [#226](https://github.com/git-malu/AnyWear/issues/226) (2026-11-02), which
+  dropped the deploy-smoke precondition. `smoke` remains the on-demand diagnostic and still
+  uploads its own revision evidence, which now has no machine consumer, and `deploy-smoke`
+  remains a live `trigger` value.
 - The compatibility pin is **deleted** (#192): the committed pin file, `docs/compatibility-pin.md`,
   `docs/compatibility-v3.md` and the pin tools (`validate-compatibility-pin.mjs`,
   `migrate-compatibility.mjs`, `check-compatibility.mjs`) were removed, and no

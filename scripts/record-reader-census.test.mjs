@@ -63,6 +63,19 @@ const RECORD_SHAPES = Object.freeze([
   'deployment-record.json',
 ]);
 
+// The consumer-side drift gate and the strict ZIP reader that served only it are removed
+// (#259). No non-test module may name either module or its identifiers, so neither can return
+// as a dead call site or an unused import. The `smoke` diagnostic's own revision upload and
+// the live `deploy-smoke` trigger are deliberately not listed: both survive.
+const REMOVED_DRIFT_TOKENS = Object.freeze([
+  'verify-smoke-drift',
+  'smoke-drift',
+  'SMOKE_DRIFT_BASELINE',
+  'artifact-zip',
+  'extractArtifactEntry',
+  'readArtifactZip',
+]);
+
 const posix = (path) => relative(repositoryRoot, path).replace(/\\/g, '/');
 
 function moduleFiles() {
@@ -117,4 +130,10 @@ test('only a test fixture may name a retired record or artifact shape', () => {
   const found = offenders(RECORD_SHAPES, { skipTests: true });
   assert.deepEqual(found, [],
     `retired record/artifact shapes may appear only in test fixtures; found:\n${found.join('\n')}`);
+});
+
+test('the removed smoke-drift gate and its ZIP reader appear in no non-test module', () => {
+  const found = offenders(REMOVED_DRIFT_TOKENS, { skipTests: true });
+  assert.deepEqual(found, [],
+    `the removed drift gate and its ZIP reader may appear nowhere outside a test; found:\n${found.join('\n')}`);
 });
