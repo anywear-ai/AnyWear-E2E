@@ -140,7 +140,7 @@ repository applies.
 ## Execution Policy
 
 Pull requests do not run cross-repository browser E2E as a required check. The E2E
-Check entry runs the explicit 25 core test files,
+Check entry runs the explicit 23 core test files,
 the credential-free tool regressions, lint, type checking, and Playwright test discovery. Client and Service workflows remain responsible for their
 required unit, repository integration, contract, database, and browser integration tests.
 
@@ -212,8 +212,7 @@ production-readiness gate for an already-deployed Beta environment. It reads the
 `build-metadata.json` and Service `/health`, compares them with the dispatch expectation,
 verifies that the live Service commit resolves to an immutable Service release, takes its own
 authenticated platform observation — the deployed surface discovered through AWS public
-list/describe APIs — verifies the deploy-smoke drift gate against the deploy-time
-observation of the same release, runs the release-gating deployed selection (including the
+list/describe APIs — runs the release-gating deployed selection (including the
 rejection-contract leg that proves the deployed Service refuses a Client below the reviewed
 floor), re-observes and requires an identical tuple, and hands a checksummed v4
 record to the credential-free `record` job, which re-verifies it offline and attaches the
@@ -363,17 +362,17 @@ tag→commit and the ECR image digest. There is no deployment record
 ([#207](https://github.com/git-malu/AnyWear/issues/207)); the qualification record proves
 the deployed *content*.
 
-Before the suite, the `full` job also runs the consumer-side drift gate
-(`scripts/verify-smoke-drift.mjs`): it finds the newest deploy-smoke observation of the
-same release — the same Service commit and image digest and the same Client source commit —
-among the 30 newest completed-success `workflow_dispatch` runs' `tested-revisions-<run>-<attempt>`
-artifacts, compares `{client, service, platform}` member by member with the
-before-observation, and refuses a differing member or a missing smoke before the suite. The
-compared smoke run is recorded in `.qualification-inputs/smoke-drift.json` (an audit file,
-not a record member), and the credential-free `record` job re-verifies it against exactly
-the recorded artifact id. Before and after the suite, `full` collects the same observation and refuses any difference in
-Client, Service or platform. The record's two observations must be identical, and the
-`environment` endpoints must match them. `verifyQualificationRecord` re-checks the exact v4
+`full` qualifies the tuple from its own two observations, with no cross-run comparison: it
+collects the authenticated deployed tuple before the suite, runs the release-gating
+selection, and collects the same observation again after the suite, refusing any difference
+in Client, Service or platform. The record's two observations must be identical, and the
+`environment` endpoints must match them. The consumer-side drift gate that compared the
+deploy-smoke observation of the same release with the qualification observation was removed
+(#259), because decision D2(c) of
+[#226](https://github.com/git-malu/AnyWear/issues/226) dropped the precondition it enforced;
+the credential-free `record` job now verifies only the record, and `smoke` keeps its own
+revision evidence for the operator.
+`verifyQualificationRecord` re-checks the exact v4
 key set, the signed `operation: full`, the expectation and trigger bindings, the observation
 stability and order, the committed floor, the four released asset names and digests, and the
 integrity digest; it refuses a v2 or v3 record, so one schema version never means two

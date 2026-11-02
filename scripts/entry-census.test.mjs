@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { repositoryRoot } from './test-selection.mjs';
@@ -15,6 +15,36 @@ const directory = join(repositoryRoot, '.github', 'workflows');
 // cannot appear beside the tracked `.yml` files without changing the census.
 const entries = readdirSync(directory).filter((name) => /\.ya?ml$/.test(name)).sort();
 const read = (name) => readFileSync(join(directory, name), 'utf8');
+
+// #259: the consumer-side drift gate (#228) is removed, together with the strict ZIP reader it
+// alone used. Naming the deleted paths and tokens here is what makes the removal guarded: the
+// assertions below fail if any of them comes back.
+const REMOVED_DRIFT_PATHS = Object.freeze([
+  'scripts/verify-smoke-drift.mjs',
+  'scripts/verify-smoke-drift.test.mjs',
+  'scripts/artifact-zip.mjs',
+  'scripts/artifact-zip.test.mjs',
+]);
+const REMOVED_DRIFT_TOKENS = Object.freeze([
+  'verify-smoke-drift',
+  'smoke-drift',
+  'SMOKE_DRIFT_BASELINE',
+  'artifact-zip',
+]);
+// The nine files the remaining `full` steps produce. Both the handoff upload and the record
+// attach list them, in this order; the removal takes the drift file out of both and changes
+// nothing else, so a release consumer names the same surviving files.
+const QUALIFICATION_EVIDENCE_PATHS = Object.freeze([
+  '.qualification-inputs/live-identity.json',
+  '.qualification-inputs/service-release.json',
+  '.qualification-inputs/beta-environment-before.json',
+  '.qualification-inputs/beta-environment-after.json',
+  'deployment-evidence-before.json',
+  'deployment-evidence.json',
+  'qualification-record.json',
+  'test-results/qualification-report.json',
+  'test-results/beta-environment-verdict.json',
+]);
 
 function jobSection(workflow, name) {
   const marker = `\n  ${name}:\n`;
@@ -36,6 +66,24 @@ function inputBlock(name) {
   const rest = qualify.slice(start + 1);
   const next = rest.search(/\n {6}[a-z_]+:\n/);
   return next < 0 ? rest : rest.slice(0, next);
+}
+
+// The `path: |` block of one uploaded artifact, as its entries in file order. A list is
+// ordered and complete: an entry added, dropped or reordered fails the pin.
+function uploadList(section, artifact) {
+  const marker = `name: ${artifact}\n`;
+  const start = section.indexOf(marker);
+  assert.ok(start >= 0, `${artifact} must be an uploaded artifact`);
+  const block = section.slice(start + marker.length);
+  const pathStart = block.indexOf('path: |\n');
+  assert.ok(pathStart >= 0, `${artifact} must declare its path list`);
+  const list = [];
+  for (const line of block.slice(pathStart + 'path: |\n'.length).split('\n')) {
+    const entry = line.match(/^ {12}(\S.*)$/);
+    if (!entry) break;
+    list.push(entry[1]);
+  }
+  return list;
 }
 
 test('the deployable unit exposes exactly two entries: one automatic check and one manual qualify', () => {
@@ -158,8 +206,9 @@ test('the qualify chain keeps one credential job per operation and a credential-
   assert.ok(record.length > 0);
   assert.match(record, /needs: \[preflight, full\]/);
   assert.match(record, /if: github\.ref == 'refs\/heads\/main' && needs\.preflight\.outputs\.operation == 'full'/);
-  // #228: the drift gate's --verify-recorded re-proof needs the Actions read scope.
-  assert.match(record, /permissions:\n {6}actions: read\n {6}contents: read\n/);
+  // #259: the drift gate is removed, so the credential-free `record` job needs no Actions read
+  // scope; `contents: read` is its whole permission block.
+  assert.match(record, /permissions:\n {6}contents: read\n\n {4}steps:/);
   assert.doesNotMatch(record, /environment:|id-token|configure-aws-credentials/);
   assert.match(job('full'), /qualification:generate/);
 
@@ -177,39 +226,57 @@ test('the qualify chain keeps one credential job per operation and a credential-
   assert.ok(qualify.trimEnd().endsWith('if-no-files-found: error'), 'record must be the last qualification job');
 });
 
-test('the deploy-smoke drift gate runs only in full and the record job re-verifies it', () => {
-  // #228: `full` gains `actions: read` (the reconcile job's precedent) and runs the
-  // drift gate immediately after the before-observation, before the suite, so a drift
-  // or a missing smoke fails before a 90-minute suite spends its time.
+test('the consumer-side drift gate is removed and both upload lists keep their nine files', () => {
+  // #259: the drift gate (#228) is deleted. `full` no longer consults another run's revision
+  // artifact, and the credential-free `record` job re-verifies nothing but the record. The
+  // deleted paths and tokens must not return; the pins below keep what the deletion had to
+  // leave standing.
   const full = job('full');
-  assert.match(full, /permissions:\n {6}actions: read\n {6}contents: read\n {6}id-token: write\n/);
-  assert.match(full, /run: node scripts\/verify-smoke-drift\.mjs\n/);
-  assert.match(full, /GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
-  assert.match(full, /SMOKE_DRIFT_BASELINE: deployment-evidence-before\.json/);
-  assert.match(full, /\.qualification-inputs\/smoke-drift\.json/);
-  const driftStep = full.indexOf('Verify the deploy-smoke observation agrees with the qualification observation');
+  const record = job('record');
+
+  // Both jobs keep only the scopes a remaining step uses. `full`'s block was byte-identical to
+  // `reconcile`'s before this change, so anchor on the key that follows it.
+  assert.match(full, /permissions:\n {6}contents: read\n {6}id-token: write\n {4}env:/);
+  assert.match(record, /permissions:\n {6}contents: read\n\n {4}steps:/);
+  // Exactly one Actions read scope remains: `reconcile`'s own lifecycle lookback lists other
+  // runs' artifacts, and no other job does.
+  assert.equal([...qualify.matchAll(/^ {6}actions: read$/gm)].length, 1, 'only reconcile may hold actions: read');
+  assert.match(job('reconcile'), /permissions:\n {6}actions: read\n {6}contents: read\n {6}id-token: write\n/);
+  // Neither job may authenticate to the Actions API: the removed drift steps held the only
+  // `secrets.GITHUB_TOKEN` uses in either.
+  for (const [name, section] of [['full', full], ['record', record]]) {
+    assert.doesNotMatch(section, /secrets\.GITHUB_TOKEN/, `${name} must hold no Actions API credential`);
+  }
+
+  // `full` runs its own before-observation, the release-gating suite and the after-observation,
+  // in that order, and nothing compares another run's evidence in between.
   const beforeObservation = full.indexOf('Observe authenticated deployed tuple before suite');
   const suite = full.indexOf('Run the release-gating business regression suite');
-  assert.ok(beforeObservation >= 0 && driftStep > beforeObservation && suite > driftStep,
-    'the drift gate must sit after the before-observation and before the suite');
+  const afterObservation = full.indexOf('Capture Beta worker identity after the suite');
+  assert.ok(beforeObservation >= 0 && suite > beforeObservation && afterObservation > suite,
+    'full must observe the tuple, run the suite and re-observe it, in that order');
 
-  // The smoke operation keeps taking the same platform observation and uploading it with
-  // its `tested-revisions-<run>-<attempt>` artifact — no drift gate there.
+  // The gate's modules and identifiers are gone; none may return to the workflow.
+  for (const path of REMOVED_DRIFT_PATHS) {
+    assert.equal(existsSync(join(repositoryRoot, path)), false, `${path} must not be restored: the drift gate is removed (#259)`);
+  }
+  for (const token of REMOVED_DRIFT_TOKENS) {
+    assert.equal(qualify.includes(token), false, `the qualify entry must not name the removed drift-gate token ${token}`);
+  }
+
+  // `full` hands off and `record` attaches exactly the nine files the remaining steps produce,
+  // in order: the deletion removes one path from each list and nothing else.
+  assert.deepEqual(uploadList(full, 'beta-qualification-handoff-${{ github.run_id }}-${{ github.run_attempt }}'), QUALIFICATION_EVIDENCE_PATHS);
+  assert.deepEqual(uploadList(record, 'beta-qualification-${{ github.run_id }}-${{ github.run_attempt }}'), QUALIFICATION_EVIDENCE_PATHS);
+
+  // The `smoke` diagnostic keeps its own evidence: the authenticated observation and its
+  // revision upload, which no machine reads any more, and no record.
   const smoke = job('smoke');
   assert.match(smoke, /name: tested-revisions-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
   assert.match(smoke, /pnpm qualification:collect/);
   for (const name of ['preflight', 'smoke', 'reconcile']) {
-    assert.doesNotMatch(job(name), /verify-smoke-drift/, `${name} must never run the drift gate`);
+    assert.doesNotMatch(job(name), /verify-smoke-drift/, `${name} must never run the removed drift gate`);
   }
-
-  // The credential-free record job gains `actions: read` and re-proves the gate against
-  // exactly the recorded artifact id.
-  const record = job('record');
-  assert.match(record, /permissions:\n {6}actions: read\n {6}contents: read\n/);
-  assert.match(record, /run: node scripts\/verify-smoke-drift\.mjs --verify-recorded\n/);
-  assert.match(record, /GH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/);
-  assert.match(record, /SMOKE_DRIFT_BASELINE: deployment-evidence-before\.json/);
-  assert.match(record, /\.qualification-inputs\/smoke-drift\.json/);
 
   // No workflow may reference the deleted vendored contract.
   for (const [name, source] of [['beta-qualification.yml', qualify], ['check.yml', check]]) {
