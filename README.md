@@ -317,7 +317,7 @@ at a floor above 0 the Service refuses a headerless request; the new
 `tests/rejection-contract.spec.ts` scenario proves the rejection contract against the
 deployed Service.
 
-`AnyWear-Service`'s release chain verifies its own sealed release before deploying it; E2E
+`AnyWear-Service`'s deploy chain verifies its own sealed artifact before deploying it; E2E
 independently verifies that the live Service commit resolves to an immutable
 `service-artifacts-<service sha>` GitHub release whose tag resolves to that same commit and
 whose four expected assets — `pre-sign-up.zip`, `post-confirmation.zip`, `runtime-policy.json`
@@ -417,7 +417,7 @@ Service release chain with the release slice.
 ## Ordinary E2E execution
 
 The former offline cross-repository builder gate was retired with the `selection`
-contract. The Service release chain verifies its own sealed release before it
+contract. The Service deploy chain verifies its own sealed artifact before it
 deploys, and qualification independently verifies that the live Service commit resolves to
 an immutable `service-artifacts-<sha>` release whose tag resolves to that commit and whose
 four expected assets carry published digests (`scripts/service-release.mjs`), without
