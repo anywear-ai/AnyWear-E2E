@@ -48,7 +48,7 @@ const lambdaCodePattern = /^[A-Za-z0-9+/]{43}=$/;
 const cloudFrontDomainPattern = /^[a-z0-9][a-z0-9-]*\.cloudfront\.net$/;
 
 export const EXPECTED_SOURCES = Object.freeze(['trigger', 'live']);
-export const QUALIFICATION_TRIGGERS = Object.freeze(['manual', 'deploy-smoke', 'release-qualify']);
+export const QUALIFICATION_TRIGGERS = Object.freeze(['manual', 'deploy-smoke', 'deploy-qualify', 'release-qualify']);
 export const OBSERVATION_KEYS = Object.freeze(['collected_at', 'client', 'service', 'platform', 'authenticated']);
 export const OBSERVED_CLIENT_KEYS = Object.freeze(['url', 'source_commit', 'built_at']);
 export const OBSERVED_SERVICE_KEYS = Object.freeze(['url', 'service_commit', 'image_digest']);
@@ -476,8 +476,12 @@ export function buildQualificationRecord(input, expected, evidence, now = new Da
     if (dispatchedBy === null) throw new Error(`A ${trigger} qualification requires the dispatched_by URL of the run that dispatched it`);
     requireHttpsUrl(dispatchedBy, 'Qualification dispatched_by');
   }
-  if (trigger === 'release-qualify' && resolvedExpected.source !== 'trigger') {
-    throw new Error('A release-qualify trigger requires a supplied expected service commit (expected.source trigger)');
+  // #180/#226: a qualification that names a supplied expectation must have one. The deploy
+  // chain's `deploy-qualify` and the human `release-qualify` both promise the record names a
+  // specific Service commit, so a record built from the live observed value alone would
+  // break that promise.
+  if ((trigger === 'release-qualify' || trigger === 'deploy-qualify') && resolvedExpected.source !== 'trigger') {
+    throw new Error(`A ${trigger} trigger requires a supplied expected service commit (expected.source trigger)`);
   }
 
   const executor = {
@@ -606,8 +610,8 @@ export function verifyQualificationRecord(record, { trustedRun } = {}) {
   } else {
     requireHttpsUrl(workflow.dispatched_by, 'Qualification dispatched_by');
   }
-  if (workflow.trigger === 'release-qualify' && payload.expected.source !== 'trigger') {
-    throw new Error('A release-qualify trigger requires a supplied expected service commit (expected.source trigger)');
+  if ((workflow.trigger === 'release-qualify' || workflow.trigger === 'deploy-qualify') && payload.expected.source !== 'trigger') {
+    throw new Error(`A ${workflow.trigger} trigger requires a supplied expected service commit (expected.source trigger)`);
   }
   if (workflow.repository !== repositories.e2e || workflow.path !== '.github/workflows/beta-qualification.yml'
     || workflow.ref !== `${repositories.e2e}/${workflow.path}@refs/heads/main`

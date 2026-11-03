@@ -83,3 +83,19 @@ test('the documented deployed invocations are exactly the scripts that select th
   for (const name of documented) assert.ok(declared.has(name),
     `${inventoryPath} documents ${name} but package.json does not declare it`);
 });
+
+// #226: the deploy chain dispatches one `full` per deployment and relies on the
+// release-gating `@regression` selection to carry the smoke evidence inside it. A spec
+// tagged `@smoke` without `@regression` would leave the smoke coverage out of the single
+// release-gating run and out of the qualification record's `test` member, so it fails here
+// rather than during a deployed qualification. This is the `@smoke ⊆ @regression` bound the
+// issue requires; the selection itself stays the spec-level `@regression` superset.
+test('every @smoke scenario is also selected by the release-gating @regression selection', async () => {
+  const specs = await specDeclarations();
+  const smoke = specs.filter(({ tags }) => tags.includes('@smoke'));
+  assert.ok(smoke.length > 0, 'no spec declares @smoke, so the subset check would be vacuous');
+  for (const { file, title, tags } of smoke) {
+    assert.ok(tags.includes('@regression'),
+      `${file} declares @smoke without @regression, so the release-gating selection would not carry its smoke evidence: ${title}`);
+  }
+});

@@ -251,11 +251,38 @@ test('records the dispatch trigger and refuses an impossible trigger binding', (
   assert.throws(() => build({ trigger: 'release-qualify' }), /release-qualify qualification requires the dispatched_by URL/);
   assert.throws(() => build({ trigger: 'manual', dispatchedBy: 'https://github.com/git-malu/AnyWear-E2E/actions/runs/1' }),
     /manual qualification must not state a dispatched_by URL/);
-  assert.throws(() => build({ trigger: 'scheduled' }), /Qualification trigger must be manual, deploy-smoke, release-qualify/);
+  assert.throws(() => build({ trigger: 'scheduled' }), /Qualification trigger must be manual, deploy-smoke, deploy-qualify, release-qualify/);
 
   const tampered = structuredClone(release.record);
   tampered.workflow.dispatched_by = 'http://insecure.example';
   assert.throws(() => verifyQualificationRecord(redigest(tampered)), /must use HTTPS/);
+});
+
+// #226: the deploy chain's `full` names the Service commit it deployed. A deploy-qualify
+// record is accepted with the dispatching Infra run and a supplied expected Service commit;
+// without either it is refused, so the record a later release tag reads cannot be issued
+// from whatever happened to be live.
+test('records deploy-qualify only with the expected commit and the dispatching run', () => {
+  const infraRun = 'https://github.com/git-malu/AnyWear-Infra/actions/runs/321';
+  const deploy = issuedRecord({ trigger: 'deploy-qualify', dispatchedBy: infraRun });
+  assert.equal(deploy.record.workflow.trigger, 'deploy-qualify');
+  assert.equal(deploy.record.workflow.dispatched_by, infraRun);
+  assert.equal(deploy.record.expected.source, 'trigger');
+  assert.equal(verifyQualificationRecord(deploy.record), true);
+
+  const build = (input, expected = deploy.fixture.expected) => buildQualificationRecord(
+    { ...deploy.fixture.input, ...input }, expected, deploy.fixture.evidence, now, deploy.fixture.environment, deploy.fixture.report);
+  assert.throws(() => build({}, { service_commit: null, client_commit: null, source: 'live' }),
+    /deploy-qualify trigger requires a supplied expected service commit/);
+  assert.throws(() => build({ dispatchedBy: null }), /deploy-qualify qualification requires the dispatched_by URL/);
+
+  // The verifier holds the same bound for a record handed to it from outside.
+  const withoutExpected = redigest({
+    ...structuredClone(deploy.record),
+    expected: { service_commit: deploy.fixture.serviceSha, client_commit: null, source: 'live' },
+  });
+  assert.throws(() => verifyQualificationRecord(withoutExpected),
+    /deploy-qualify trigger requires a supplied expected service commit/);
 });
 
 test('requires a stable full observation and refuses each changed member by name', () => {

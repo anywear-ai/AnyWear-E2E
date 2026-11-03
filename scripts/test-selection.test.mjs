@@ -438,7 +438,8 @@ test('the qualification entry dispatches the live tuple and approves through the
     assert.ok(workflow.includes(`\n      ${input}:\n`), `${input} must be a declared dispatch input`);
   }
   // #217 adds the daily `scheduled` trigger, which may only ask for the reconcile operation.
-  assert.match(workflow, /options: \[manual, deploy-smoke, release-qualify, scheduled\]/);
+  // #226 adds the deploy chain's `deploy-qualify`, which may only ask for full.
+  assert.match(workflow, /options: \[manual, deploy-smoke, deploy-qualify, release-qualify, scheduled\]/);
   // The release decision is the green full run plus the sealed record: no approval
   // Environment and no approval job exist.
   assert.doesNotMatch(workflow, /beta-release-approval|\n {2}approve:\n|AwaitingApproval/);

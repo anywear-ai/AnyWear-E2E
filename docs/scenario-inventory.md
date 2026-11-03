@@ -40,8 +40,12 @@ producer/verifier and the Infra-side executor allow-list check `operation == ful
 
 Since [#180](https://github.com/git-malu/AnyWear/issues/180) the dispatch surface also names
 the trigger and the expectation it was dispatched for: `trigger=deploy-smoke` only runs
-`smoke`, `trigger=release-qualify` only runs `full` and requires `expected_service_commit`, and
-`trigger=manual` covers re-runs and diagnostics. `full` compares the expected Service commit
+`smoke`, `trigger=deploy-qualify` only runs `full` and requires `expected_service_commit`,
+`worker_slot_offset=0` and the dispatching run URL, `trigger=release-qualify` only runs `full`
+and requires `expected_service_commit`, and `trigger=manual` covers re-runs and diagnostics.
+Since [#226](https://github.com/git-malu/AnyWear/issues/226) the deploy chain's `full` uses
+`deploy-qualify`, and `release-qualify` has no workflow producer: it stays the value a person
+dispatches for a deliberate re-qualification. `full` compares the expected Service commit
 with the live `/health` value, writes qualification record v4 from the live observed tuple and
 the immutable Service release identity it verified (the release tag, the commit it resolves to
 and the four released assets with their published digests), and
