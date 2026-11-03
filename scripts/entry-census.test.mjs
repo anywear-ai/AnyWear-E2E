@@ -125,7 +125,8 @@ test('the deployable unit exposes exactly two entries: one automatic check and o
   assert.match(trigger, /type: choice/);
   assert.match(trigger, /default: manual/);
   // #217: `scheduled` is the daily reconcile dispatch; it may only ask for reconcile.
-  assert.match(trigger, /options: \[manual, deploy-smoke, release-qualify, scheduled\]/);
+  // #226: `deploy-qualify` is the deploy chain's qualification; it may only ask for full.
+  assert.match(trigger, /options: \[manual, deploy-smoke, deploy-qualify, release-qualify, scheduled\]/);
   const dispatchedBy = inputBlock('dispatched_by');
   assert.match(dispatchedBy, /required: false/);
   assert.match(dispatchedBy, /type: string/);
@@ -139,6 +140,40 @@ test('the deployable unit exposes exactly two entries: one automatic check and o
   assert.doesNotMatch(qualify, /\.infra-source/);
   assert.match(qualify, /node scripts\/service-release\.mjs/);
   assert.match(qualify, /minimum-supported-client\.json/);
+});
+
+// #226: the receiver changes by one trigger value, one run name and one queue key. The
+// single account-pool group keeps its non-cancelling property and now queues up to
+// GitHub's maximum, and the run name carries the dispatch key the release chain and the
+// dispatching hooks read back.
+test('the qualify entry queues its account pool and names each run with the dispatch key', () => {
+  assert.match(qualify, /^concurrency:\n {2}group: beta-e2e-account-pool\n {2}cancel-in-progress: false\n {2}queue: max$/m,
+    'the single beta-e2e-account-pool group must stay non-cancelling and queue its runs');
+
+  // The release chain finds the record of a Service commit by the run name, and the Infra
+  // `qualify-hook` and the Client `handoff` read their own run URL back from it. A manual
+  // dispatch renders `-` for a missing expected commit and `@actor` for a missing dispatcher.
+  const runName = /^run-name: (.+)$/m.exec(qualify)?.[1] ?? '';
+  assert.ok(runName.length > 0, 'the qualify entry must declare a run-name');
+  assert.match(runName, /Beta qualification: /, 'the run name must name the qualification');
+  for (const expression of [
+    '${{ inputs.operation }}',
+    '${{ inputs.trigger }}',
+    "${{ inputs.expected_service_commit || '-' }}",
+    "${{ inputs.dispatched_by || format('@{0}', github.actor) }}",
+  ]) {
+    assert.ok(runName.includes(expression), `the run name must render ${expression}`);
+  }
+
+  // The deploy chain's trigger is accepted only with its own payload: the full operation, a
+  // supplied expected Service commit and worker slot offset 0 (the dispatching Infra run URL
+  // is required by the non-manual rule). A smoke or slot-bearing dispatch is refused here,
+  // before the reconcile job or the suite.
+  const deployQualify = /^ {12}deploy-qualify\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
+  assert.ok(deployQualify.length > 0, 'the preflight must validate the deploy-qualify trigger');
+  assert.match(deployQualify, /trigger deploy-qualify requires operation full/);
+  assert.match(deployQualify, /trigger deploy-qualify requires expected_service_commit/);
+  assert.match(deployQualify, /trigger deploy-qualify requires worker_slot_offset 0/);
 });
 
 test('the qualify chain keeps one credential job per operation and a credential-free record', () => {

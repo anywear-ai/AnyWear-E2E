@@ -1,11 +1,17 @@
 name: Beta Qualification
+# #226: the release chain finds the qualification record for a Service commit by this run
+# name, and the Infra `qualify-hook` and the Client `handoff` read their own run URL back
+# from it. The name states the operation, the trigger, the expected Service commit (`-`
+# when none was supplied) and the dispatching run (`@actor` for a manual dispatch).
+run-name: "Beta qualification: ${{ inputs.operation }} · ${{ inputs.trigger }} · ${{ inputs.expected_service_commit || '-' }} · by ${{ inputs.dispatched_by || format('@{0}', github.actor) }}"
 
 # The E2E deployable unit's single manual entry (#163): the `qualify` entry. One protected
 # dispatch surface carries three operations — `full` (release qualification), `smoke`
 # (deployed diagnostic) and `reconcile` (automatic leftover expiry) — and since #180 it is
-# also dispatched by another workflow: a deployment smoke hook
-# (`trigger=deploy-smoke`), the release action (`trigger=release-qualify`) and, since #217,
-# the daily account-reconcile schedule (`trigger=scheduled`).
+# also dispatched by other workflows: a deployment smoke hook (`trigger=deploy-smoke`), the
+# deploy chain's qualification (`trigger=deploy-qualify`, #226) and, since #217, the daily
+# account-reconcile schedule (`trigger=scheduled`). `trigger=release-qualify` stays the
+# human-only re-qualification trigger: after #226 no workflow sends it.
 #
 # #217: leftover data is bounded by time, not quarantined, and the manual `recover` exit is
 # removed. The `reconcile` job runs before every qualification suite and as its own
@@ -44,9 +50,10 @@ on:
         type: choice
         options: [full, smoke, reconcile]
       expected_service_commit:
-        # #180: supplied by the release action (release-qualify) or by an operator who
-        # re-runs a qualification. Only `full` compares it with the live Service commit,
-        # and every other operation refuses it in the preflight.
+        # #180: supplied by the deploy chain (`deploy-qualify`, #226) or by an operator who
+        # re-runs a qualification (`release-qualify` or a manual `full`). Only `full`
+        # compares it with the live Service commit, and every other operation refuses it. A
+        # `deploy-qualify` dispatch without one is refused in the preflight.
         description: Expected live Service commit (40-hex); optional, and only operation full accepts it
         required: false
         type: string
@@ -57,11 +64,11 @@ on:
       trigger:
         # The trigger is evidence, not a permission: the preflight validates the exact
         # combination with the operation and the dispatch inputs, and the record states it.
-        description: 'Qualification trigger: manual, deploy-smoke (smoke only), release-qualify (full only) or scheduled (reconcile only)'
+        description: 'Qualification trigger: manual, deploy-smoke (smoke only), deploy-qualify (full only), release-qualify (full only) or scheduled (reconcile only)'
         required: false
         default: manual
         type: choice
-        options: [manual, deploy-smoke, release-qualify, scheduled]
+        options: [manual, deploy-smoke, deploy-qualify, release-qualify, scheduled]
       dispatched_by:
         description: URL of the run that dispatched this qualification; only accepted for a non-manual trigger
         required: false
@@ -107,6 +114,7 @@ env:
 concurrency:
   group: beta-e2e-account-pool
   cancel-in-progress: false
+  queue: max
 
 jobs:
   # The gate that runs before any credential job. It holds no AWS credentials, declares no
@@ -224,6 +232,25 @@ jobs:
               fi
               if [[ "$WORKER_SLOT_OFFSET" != 0 ]]; then
                 echo "::error::trigger release-qualify requires worker_slot_offset 0 (got '$WORKER_SLOT_OFFSET')"
+                exit 1
+              fi
+              ;;
+            deploy-qualify)
+              # #226: the deploy chain's qualification names the Service commit it deployed.
+              # It is the `full` the Infra `qualify-hook` dispatches, so a dispatch with any
+              # other operation, no expected commit or a displaced worker slot is a mistake
+              # refused here, before the reconcile job or the suite. The dispatching Infra run
+              # URL is required by the non-manual `dispatched_by` rule below.
+              if [[ "$OPERATION" != full ]]; then
+                echo "::error::trigger deploy-qualify requires operation full (got '$OPERATION')"
+                exit 1
+              fi
+              if [[ -z "$EXPECTED_SERVICE_COMMIT" ]]; then
+                echo "::error::trigger deploy-qualify requires expected_service_commit"
+                exit 1
+              fi
+              if [[ "$WORKER_SLOT_OFFSET" != 0 ]]; then
+                echo "::error::trigger deploy-qualify requires worker_slot_offset 0 (got '$WORKER_SLOT_OFFSET')"
                 exit 1
               fi
               ;;

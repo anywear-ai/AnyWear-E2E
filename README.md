@@ -204,10 +204,13 @@ surface, with the required operation menu `full` (release gate), `smoke` (diagno
 `reconcile` (automatic leftover expiry). Its
 dispatch also carries
 `expected_service_commit` and `expected_client_commit` (`full` only), `trigger` (`manual`,
-`deploy-smoke` for the deployment smoke hook, `release-qualify` for the release action,
-`scheduled` for the daily reconcile dispatch) and
+`deploy-smoke` for the deployment smoke hook, `deploy-qualify` for the deploy chain's
+qualification, `release-qualify` for a deliberate human re-qualification, `scheduled` for the
+daily reconcile dispatch) and
 `dispatched_by` (the dispatching run URL; non-manual triggers only), and the credential-free
-preflight validates that combination before any credential job. The `full` operation is the
+preflight validates that combination before any credential job. Each run is named
+`Beta qualification: <operation> · <trigger> · <expected Service commit or -> · by <dispatched_by or @actor>`,
+and the release chain finds the qualification record of a Service commit by that name. The `full` operation is the
 production-readiness gate for an already-deployed Beta environment. It reads the live Client
 `build-metadata.json` and Service `/health`, compares them with the dispatch expectation,
 verifies that the live Service commit resolves to an immutable Service release, takes its own

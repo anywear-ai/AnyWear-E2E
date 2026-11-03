@@ -1,0 +1,14 @@
+# actionlint configuration. The check itself is a workflow step in
+# `.github/workflows/check.yml`; this file only records reviewed false positives.
+paths:
+  .github/workflows/beta-qualification.yml:
+    ignore:
+      # actionlint 1.7.12 bundles a workflow schema captured before GitHub Actions
+      # accepted the `concurrency.queue` key (`queue: max` queues up to 100 pending
+      # runs, processed in wait order). The pinned linter fails with
+      # `unexpected key "queue" for "concurrency" section` even though the key is
+      # valid on the live workflow, where it pairs with the non-cancelling
+      # `cancel-in-progress: false` the single `beta-e2e-account-pool` group needs.
+      # The ignore covers only this stale-schema message for this one file; a newer
+      # reviewed actionlint can drop it once its schema knows the key.
+      - 'unexpected key "queue" for "concurrency" section'
