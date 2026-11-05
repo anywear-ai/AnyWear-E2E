@@ -125,7 +125,7 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
     await page.getByRole('button', { name: 'Add Item' }).click();
     await expect(page.getByRole('heading', { name: 'Add Wardrobe Item' })).toBeVisible();
 
-    await page.locator('input[type="file"]').setInputFiles(uploadFixture);
+    await page.locator('input[type="file"][multiple]').setInputFiles(uploadFixture);
     const uploaded = page.waitForResponse(serviceJson({ method: 'POST', path: '/wardrobe/upload-url' }));
     const confirmed = page.waitForResponse(serviceJson({ method: 'POST', path: '/wardrobe/upload' }));
     await page.getByRole('button', { name: 'Upload & Auto-Tag' }).click();
