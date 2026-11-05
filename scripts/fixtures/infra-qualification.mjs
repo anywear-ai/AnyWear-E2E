@@ -2,7 +2,7 @@ import { environmentVerdict } from '../qualification-environment.mjs';
 import { SERVICE_RELEASE_ASSET_NAMES } from '../qualification-record.mjs';
 import { readMinimumSupportedClient } from '../minimum-supported-client.mjs';
 import { SCENARIO_DIRECTORY, qualificationSelection, selectedScenarios } from '../test-selection.mjs';
-import { contentHash } from '../evidence-contract.mjs';
+import { contentHash, repositories } from '../evidence-contract.mjs';
 
 // A v4 qualification fixture. Every member of the record is built from the same
 // derivation the live path uses, so the fixture cannot state a shape the producer would
@@ -125,7 +125,7 @@ export function qualificationFixture({
   // exactly the four released assets with their published size and digest. The fixture
   // derives the asset names from the frozen constant so it cannot drift from the gate.
   const serviceArtifacts = {
-    repository: 'git-malu/AnyWear-Service',
+    repository: repositories.service,
     release_id: 10,
     tag: `service-artifacts-${serviceSha}`,
     target_commit: serviceSha,
@@ -138,14 +138,14 @@ export function qualificationFixture({
     result: 'passed',
     operation: 'full',
     e2eSha: sha('d'),
-    repository: 'git-malu/AnyWear-E2E',
+    repository: repositories.e2e,
     runId: '123',
     runAttempt: '1',
     serverUrl: 'https://github.com',
     awsAccountId: '650880818323',
     awsRegion: 'ap-east-1',
     workflowPath: '.github/workflows/beta-qualification.yml',
-    workflowRef: 'git-malu/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main',
+    workflowRef: `${repositories.e2e}/.github/workflows/beta-qualification.yml@refs/heads/main`,
     trigger,
     dispatchedBy,
   };

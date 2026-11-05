@@ -324,7 +324,7 @@ test('no qualification job downloads a producer deployment record or checks out 
     const section = job(name);
     assert.doesNotMatch(section, /platform-deployment-record\.json/, `${name} must not retain the retired platform record`);
     assert.doesNotMatch(section, /\.qualification-inputs\/deployment-record\.json/, `${name} must not retain the retired workload record`);
-    assert.doesNotMatch(section, /repository: git-malu\/AnyWear-Infra/, `${name} must not check out the Infra observer`);
+    assert.doesNotMatch(section, /repository: anywear-ai\/AnyWear-Infra/, `${name} must not check out the Infra observer`);
   }
   // The full job records and retains the two files the v4 record is built from: the live
   // tuple and the Service release identity (#193 renamed the identity input and removed

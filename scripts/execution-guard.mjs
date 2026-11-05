@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { repositories, requireCommit, requireString } from './evidence-contract.mjs';
+import { requireCommit, requireString } from './evidence-contract.mjs';
 
 const sourceRoot = fileURLToPath(new URL('..', import.meta.url));
 
@@ -35,9 +35,10 @@ export function qualificationSessionName(environment = process.env) {
 }
 
 export function assertE2EExecution(environment = process.env, { sourceOnly = false, sourceSha } = {}) {
-  if (environment.GITHUB_REPOSITORY !== repositories.e2e
-    || environment.GITHUB_REPOSITORY_ID !== '1317091305'
-    || environment.GITHUB_REPOSITORY_OWNER !== 'git-malu' || environment.GITHUB_REPOSITORY_OWNER_ID !== '11473072'
+  // #266: the repository is identified by its numeric id alone. The repository keeps its id
+  // through the transfer while the owner login and owner id in these variables change, so an
+  // owner-name clause would refuse either the run before the transfer or the run after it.
+  if (environment.GITHUB_REPOSITORY_ID !== '1317091305'
     || environment.GITHUB_REF !== 'refs/heads/main' || environment.GITHUB_EVENT_NAME !== 'workflow_dispatch'
     || environment.E2E_STAGE !== 'beta') throw new Error('E2E operations require the protected main Beta repository/owner dispatch');
   if (environment.ENABLE_BETA_MUTATION !== 'true') throw new Error('Beta mutation activation gate is closed');
@@ -46,7 +47,7 @@ export function assertE2EExecution(environment = process.env, { sourceOnly = fal
   const entry = operationEntries[operation];
   const sha = requireCommit(environment.GITHUB_SHA, 'Current E2E revision');
   if (environment.GITHUB_WORKFLOW_SHA !== sha
-    || environment.GITHUB_WORKFLOW_REF !== `${repositories.e2e}/.github/workflows/${entry}.yml@refs/heads/main`) {
+    || environment.GITHUB_WORKFLOW_REF !== `${environment.GITHUB_REPOSITORY}/.github/workflows/${entry}.yml@refs/heads/main`) {
     throw new Error('E2E execution requires an exact protected workflow/source');
   }
   const actual = sourceSha ?? execFileSync('git', ['--no-replace-objects', '-C', sourceRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();

@@ -17,11 +17,11 @@ const human = 'human@example.com';
 
 function environment(patch = {}) {
   return {
-    GITHUB_REPOSITORY: 'git-malu/AnyWear-E2E', GITHUB_REPOSITORY_ID: '1317091305',
-    GITHUB_REPOSITORY_OWNER: 'git-malu', GITHUB_REPOSITORY_OWNER_ID: '11473072',
+    GITHUB_REPOSITORY: 'anywear-ai/AnyWear-E2E', GITHUB_REPOSITORY_ID: '1317091305',
+    GITHUB_REPOSITORY_OWNER: 'anywear-ai', GITHUB_REPOSITORY_OWNER_ID: '352675702',
     GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'workflow_dispatch',
     GITHUB_SHA: sourceSha, GITHUB_WORKFLOW_SHA: sourceSha,
-    GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main',
+    GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main',
     GITHUB_RUN_ID: '123456789', GITHUB_RUN_ATTEMPT: '1',
     E2E_STAGE: 'beta', ENABLE_BETA_MUTATION: 'true', E2E_WORKERS: '2', E2E_OPERATION: 'full',
     E2E_CLEANUP_SERVICE_SHA: 'b'.repeat(40),
@@ -67,6 +67,34 @@ test('the pre-flight reads only the tester allowlist under the dedicated guarded
     stdio: ['ignore', 'pipe', 'pipe'], env: input } }]);
 });
 
+// #266: the qualification workflow ref is owner-relative. The same protected entry is
+// accepted from either owner during the transfer window, and any other workflow file is
+// refused even in the right repository.
+test('the qualification workflow ref is owner-relative across the transfer window', () => {
+  for (const [repository, login, id] of [
+    ['anywear-ai/AnyWear-E2E', 'anywear-ai', '352675702'],
+    ['git-malu/AnyWear-E2E', 'git-malu', '11473072'],
+  ]) {
+    const io = reader();
+    assert.deepEqual(verifyBetaAdmissionEligibility(environment({
+      GITHUB_REPOSITORY: repository,
+      GITHUB_REPOSITORY_OWNER: login,
+      GITHUB_REPOSITORY_OWNER_ID: id,
+      GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/beta-qualification.yml@refs/heads/main`,
+    }), { execute: io.execute, sourceSha }), { versions: { tester_allowlist: 7 } }, repository);
+  }
+  for (const [patch, workflowRef] of [
+    [{ GITHUB_REPOSITORY: 'anywear-ai/AnyWear-E2E' }, 'anywear-ai/AnyWear-E2E/.github/workflows/integration.yml@refs/heads/main'],
+    [{ GITHUB_REPOSITORY: 'anywear-ai/AnyWear-E2E' }, 'anywear-ai/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/candidate'],
+    [{ GITHUB_REPOSITORY: 'git-malu/AnyWear-E2E' }, 'anywear-ai/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main'],
+  ]) {
+    const io = reader();
+    assert.throws(() => verifyBetaAdmissionEligibility(environment({ ...patch, GITHUB_WORKFLOW_REF: workflowRef }),
+      { execute: io.execute, sourceSha }), /protected workflow\/source/, workflowRef);
+    assert.deepEqual(io.calls, [], 'the refusal happens before any SSM read');
+  }
+});
+
 test('the required addresses follow the run\'s worker slot offset', () => {
   // Offset 2 leases rows 2 and 3, so rows 0 and 1 need not be listed.
   const io = reader(JSON.stringify(response({ testers: [...required(2)] })));
@@ -84,10 +112,9 @@ test('missing or foreign dedicated identity and untrusted dispatch fail before a
     { E2E_AWS_PRINCIPAL_ARN: 'arn:aws:sts::650880818323:assumed-role/beta-infra-deployment-role/fixture' },
     { E2E_AWS_PRINCIPAL_ARN: 'arn:aws:iam::650880818323:user/local-admin' },
     { GITHUB_REPOSITORY: 'foreign/AnyWear-E2E' }, { GITHUB_REPOSITORY_ID: '1' },
-    { GITHUB_REPOSITORY_OWNER: 'foreign' }, { GITHUB_REPOSITORY_OWNER_ID: '1' },
     { GITHUB_REF: 'refs/heads/candidate' }, { GITHUB_EVENT_NAME: 'pull_request' },
     { GITHUB_WORKFLOW_SHA: 'c'.repeat(40) },
-    { GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-E2E/.github/workflows/integration.yml@refs/heads/main' },
+    { GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/integration.yml@refs/heads/main' },
     { E2E_STAGE: 'dev' }, { ENABLE_BETA_MUTATION: 'false' },
     { E2E_OPERATION: undefined }, { E2E_OPERATION: 'observe' },
     { AWS_ACCOUNT_ID: '111111111111' }, { AWS_REGION: 'us-east-1' },

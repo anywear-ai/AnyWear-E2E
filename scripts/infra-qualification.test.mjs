@@ -644,7 +644,7 @@ test('the stage-input schema hash is content identity derived from the inputs', 
 test('promotion requires the exact unexpired artifact and completed-success E2E attempt, beyond the self-checksum', () => {
   const record = qualify(qualificationFixture());
   const recordBytes = Buffer.from(`${JSON.stringify(record, null, 2)}\n`);
-  const trustedRun = { id: 123, run_attempt: 1, repository: { full_name: 'git-malu/AnyWear-E2E' }, path: '.github/workflows/beta-qualification.yml',
+  const trustedRun = { id: 123, run_attempt: 1, repository: { full_name: 'anywear-ai/AnyWear-E2E' }, path: '.github/workflows/beta-qualification.yml',
     head_sha: record.revisions.e2e.sha, head_branch: 'main', event: 'workflow_dispatch', status: 'completed', conclusion: 'success',
     run_started_at: '2026-10-07T23:59:00Z', updated_at: '2026-10-08T00:25:00Z' };
   const trustedArtifact = { id: 90, name: 'beta-qualification-123-1', expired: false, expires_at: '2026-10-09T00:00:00Z',
@@ -668,10 +668,10 @@ test('promotion requires the exact unexpired artifact and completed-success E2E 
 
 test('execution guard binds protected dispatch/source and the captured dedicated principal', () => {
   const sourceSha = 'a'.repeat(40);
-  const env = { GITHUB_REPOSITORY: 'git-malu/AnyWear-E2E', GITHUB_REPOSITORY_ID: '1317091305',
-    GITHUB_REPOSITORY_OWNER: 'git-malu', GITHUB_REPOSITORY_OWNER_ID: '11473072',
+  const env = { GITHUB_REPOSITORY: 'anywear-ai/AnyWear-E2E', GITHUB_REPOSITORY_ID: '1317091305',
+    GITHUB_REPOSITORY_OWNER: 'anywear-ai', GITHUB_REPOSITORY_OWNER_ID: '352675702',
     GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'workflow_dispatch',
-    GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main',
+    GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main',
     GITHUB_WORKFLOW_SHA: sourceSha, GITHUB_SHA: sourceSha, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '1',
     E2E_STAGE: 'beta', ENABLE_BETA_MUTATION: 'true', E2E_OPERATION: 'full', AWS_ACCOUNT_ID: '650880818323', AWS_REGION: 'ap-east-1',
     E2E_CLEANUP_SERVICE_SHA: 'b'.repeat(40), E2E_AWS_ACCOUNT: '650880818323',
@@ -680,12 +680,15 @@ test('execution guard binds protected dispatch/source and the captured dedicated
   for (const operation of ['full', 'smoke', 'reconcile']) {
     assert.equal(assertE2EExecution({ ...env, E2E_OPERATION: operation }, { sourceSha }), true);
   }
-  for (const patch of [{ ENABLE_BETA_MUTATION: 'false' }, { GITHUB_REPOSITORY: 'other/E2E' }, { GITHUB_REPOSITORY_ID: '1' },
-    { GITHUB_REPOSITORY_OWNER: 'other' }, { GITHUB_REPOSITORY_OWNER_ID: '1' }, { GITHUB_REF: 'refs/heads/topic' },
+  // #266: the guard identifies the repository by numeric id only, so a foreign owner login
+  // or owner id is no longer a refusal clause; the repository id and the exact workflow ref
+  // are.
+  for (const patch of [{ ENABLE_BETA_MUTATION: 'false' }, { GITHUB_REPOSITORY_ID: '1' },
+    { GITHUB_REF: 'refs/heads/topic' },
     { GITHUB_EVENT_NAME: 'pull_request' }, { E2E_STAGE: 'dev' }, { GITHUB_WORKFLOW_SHA: 'b'.repeat(40) },
-    { GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-E2E/.github/workflows/integration.yml@refs/heads/main' },
-    { GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-E2E/.github/workflows/retired-recovery.yml@refs/heads/main' },
-    { GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-E2E/.github/workflows/runtime-drill.yml@refs/heads/main' },
+    { GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/integration.yml@refs/heads/main' },
+    { GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/retired-recovery.yml@refs/heads/main' },
+    { GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/runtime-drill.yml@refs/heads/main' },
     { E2E_OPERATION: undefined }, { E2E_OPERATION: '' }, { E2E_OPERATION: 'measure' },
     // #217: the manual recover operation is removed, so the guard refuses it explicitly.
     { E2E_OPERATION: 'recover' },

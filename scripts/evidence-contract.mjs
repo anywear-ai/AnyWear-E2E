@@ -1,17 +1,19 @@
 import { createHash } from 'node:crypto';
 
-export const repositories = Object.freeze({
-  client: 'git-malu/AnyWear-Client',
-  service: 'git-malu/AnyWear-Service',
-  infra: 'git-malu/AnyWear-Infra',
-  e2e: 'git-malu/AnyWear-E2E',
-});
-
 // Declared identity for the owning account and its repositories. Workflow-run
 // and artifact checks read the owner identity from the API response and compare
 // it with these values; nothing here is inferred from a filesystem path or
 // supplied by an unowned environment secret.
-export const owner = Object.freeze({ login: 'git-malu', id: 11473072 });
+export const owner = Object.freeze({ login: 'anywear-ai', id: 352675702 });
+// The four full names carry the declared owner. Deriving them from `owner.login` keeps the
+// name map and `repositoryIds` consistent: the repository transfer changes the owner half
+// of every name while each numeric id below stays the same.
+export const repositories = Object.freeze({
+  client: `${owner.login}/AnyWear-Client`,
+  service: `${owner.login}/AnyWear-Service`,
+  infra: `${owner.login}/AnyWear-Infra`,
+  e2e: `${owner.login}/AnyWear-E2E`,
+});
 export const repositoryIds = Object.freeze({
   [repositories.client]: 1176104200,
   [repositories.service]: 1158460323,
