@@ -11,7 +11,10 @@ import { assertE2EExecution } from './execution-guard.mjs';
 // (`normalizeTesterEmails`): a compact JSON array of sorted, trimmed, lowercase exact
 // emails, at most 50, within the SSM value size.
 const TESTER_ALLOWLIST_PARAMETER = '/anywear/beta/tester_allowlist';
-const qualificationWorkflow = 'git-malu/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main';
+// #266: owner-relative, so the same protected entry is recognised on either side of the
+// repository transfer. The repository half of the workflow ref is derived from the run's
+// own GITHUB_REPOSITORY when it is compared below.
+const qualificationWorkflow = (repository) => `${repository}/.github/workflows/beta-qualification.yml@refs/heads/main`;
 // #163: operation `full` runs exactly two workers, and that width is part of the
 // operation's shape. The pre-flight checks the same width the suite will use.
 const QUALIFICATION_WORKERS = 2;
@@ -69,7 +72,7 @@ export function verifyBetaAdmissionEligibility(environment = process.env, { exec
   assertE2EExecution(environment, { sourceSha });
   // #163: operation `full` qualifies with two workers and is the only caller of this
   // check. The worker count is part of the operation's shape.
-  if (environment.GITHUB_WORKFLOW_REF !== qualificationWorkflow || environment.E2E_WORKERS !== '2') {
+  if (environment.GITHUB_WORKFLOW_REF !== qualificationWorkflow(environment.GITHUB_REPOSITORY) || environment.E2E_WORKERS !== '2') {
     throw new Error(`Beta admission eligibility requires the exact qualification workflow with exactly 2 workers for operation ${environment.E2E_OPERATION}`);
   }
   // The slot offset is validated before the read: an out-of-range offset must never

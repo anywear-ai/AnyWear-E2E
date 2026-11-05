@@ -131,10 +131,10 @@ test('creates and verifies a checksummed passing v4 record from the live tuple',
   assert.equal(record.qualification_id, 'beta-123-1');
   assert.equal(record.operation, 'full');
   assert.deepEqual(record.expected, { service_commit: f.serviceSha, client_commit: f.clientSha, source: 'trigger' });
-  assert.deepEqual(record.revisions.e2e, { repository: 'git-malu/AnyWear-E2E', sha: f.input.e2eSha });
-  assert.deepEqual(record.revisions.client, { repository: 'git-malu/AnyWear-Client', sha: f.clientSha, client_version: f.clientVersion });
+  assert.deepEqual(record.revisions.e2e, { repository: 'anywear-ai/AnyWear-E2E', sha: f.input.e2eSha });
+  assert.deepEqual(record.revisions.client, { repository: 'anywear-ai/AnyWear-Client', sha: f.clientSha, client_version: f.clientVersion });
   assert.deepEqual(record.revisions.service, {
-    repository: 'git-malu/AnyWear-Service', sha: f.serviceSha, image_digest: f.image, minimum_client_version: f.minimumClientVersion,
+    repository: 'anywear-ai/AnyWear-Service', sha: f.serviceSha, image_digest: f.image, minimum_client_version: f.minimumClientVersion,
   });
   assert.equal(record.revisions.infra, undefined);
   assert.equal(record.compatibility, undefined);
@@ -142,7 +142,7 @@ test('creates and verifies a checksummed passing v4 record from the live tuple',
   // v4: the release's own identity, not a manifest asset. The tag names the qualified
   // Service commit, and the tag's target commit is that same commit.
   assert.deepEqual(record.service_artifacts, {
-    repository: 'git-malu/AnyWear-Service',
+    repository: 'anywear-ai/AnyWear-Service',
     release_id: 10,
     tag: `service-artifacts-${f.serviceSha}`,
     target_commit: f.serviceSha,
@@ -178,7 +178,7 @@ test('refuses a record that still carries a pin, a deployment record or an infra
   for (const [label, mutate] of [
     ['compatibility', (copy) => { copy.compatibility = { version: 3 }; }],
     ['deployment', (copy) => { copy.deployment = { platform: {}, workload: {} }; }],
-    ['revisions.infra', (copy) => { copy.revisions.infra = { repository: 'git-malu/AnyWear-Infra', sha: 'e'.repeat(40) }; }],
+    ['revisions.infra', (copy) => { copy.revisions.infra = { repository: 'anywear-ai/AnyWear-Infra', sha: 'e'.repeat(40) }; }],
   ]) {
     const tampered = structuredClone(record);
     mutate(tampered);
@@ -238,18 +238,18 @@ test('states the expectation source and binds it to the live tuple', () => {
 test('records the dispatch trigger and refuses an impossible trigger binding', () => {
   const manual = issuedRecord();
   assert.equal(manual.record.workflow.trigger, 'manual');
-  const release = issuedRecord({ trigger: 'release-qualify', dispatchedBy: 'https://github.com/git-malu/AnyWear-Service/actions/runs/123' });
+  const release = issuedRecord({ trigger: 'release-qualify', dispatchedBy: 'https://github.com/anywear-ai/AnyWear-Service/actions/runs/123' });
   assert.equal(release.record.workflow.trigger, 'release-qualify');
-  assert.equal(release.record.workflow.dispatched_by, 'https://github.com/git-malu/AnyWear-Service/actions/runs/123');
+  assert.equal(release.record.workflow.dispatched_by, 'https://github.com/anywear-ai/AnyWear-Service/actions/runs/123');
   assert.equal(verifyQualificationRecord(release.record), true);
 
   const build = (input, expected = manual.fixture.expected) => buildQualificationRecord(
     { ...manual.fixture.input, ...input }, expected, manual.fixture.evidence, now, manual.fixture.environment, manual.fixture.report);
   assert.throws(() => build({ trigger: 'deploy-smoke' }), /deploy-smoke trigger only dispatches the smoke operation/);
-  assert.throws(() => build({ trigger: 'release-qualify', dispatchedBy: 'https://github.com/git-malu/AnyWear-E2E/actions/runs/1' },
+  assert.throws(() => build({ trigger: 'release-qualify', dispatchedBy: 'https://github.com/anywear-ai/AnyWear-E2E/actions/runs/1' },
     { service_commit: null, client_commit: null, source: 'live' }), /release-qualify trigger requires a supplied expected service commit/);
   assert.throws(() => build({ trigger: 'release-qualify' }), /release-qualify qualification requires the dispatched_by URL/);
-  assert.throws(() => build({ trigger: 'manual', dispatchedBy: 'https://github.com/git-malu/AnyWear-E2E/actions/runs/1' }),
+  assert.throws(() => build({ trigger: 'manual', dispatchedBy: 'https://github.com/anywear-ai/AnyWear-E2E/actions/runs/1' }),
     /manual qualification must not state a dispatched_by URL/);
   assert.throws(() => build({ trigger: 'scheduled' }), /Qualification trigger must be manual, deploy-smoke, deploy-qualify, release-qualify/);
 
@@ -263,7 +263,7 @@ test('records the dispatch trigger and refuses an impossible trigger binding', (
 // without either it is refused, so the record a later release tag reads cannot be issued
 // from whatever happened to be live.
 test('records deploy-qualify only with the expected commit and the dispatching run', () => {
-  const infraRun = 'https://github.com/git-malu/AnyWear-Infra/actions/runs/321';
+  const infraRun = 'https://github.com/anywear-ai/AnyWear-Infra/actions/runs/321';
   const deploy = issuedRecord({ trigger: 'deploy-qualify', dispatchedBy: infraRun });
   assert.equal(deploy.record.workflow.trigger, 'deploy-qualify');
   assert.equal(deploy.record.workflow.dispatched_by, infraRun);

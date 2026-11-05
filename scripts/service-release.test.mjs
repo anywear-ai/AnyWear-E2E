@@ -12,9 +12,9 @@ import { readMinimumSupportedClient } from './minimum-supported-client.mjs';
 const serviceSha = 'b'.repeat(40);
 const otherSha = 'e'.repeat(40);
 const tag = `service-artifacts-${serviceSha}`;
-const releasePath = `repos/git-malu/AnyWear-Service/releases/tags/${tag}`;
-const refPath = `repos/git-malu/AnyWear-Service/git/ref/tags/${tag}`;
-const tagObjectPath = (sha) => `repos/git-malu/AnyWear-Service/git/tags/${sha}`;
+const releasePath = `repos/anywear-ai/AnyWear-Service/releases/tags/${tag}`;
+const refPath = `repos/anywear-ai/AnyWear-Service/git/ref/tags/${tag}`;
+const tagObjectPath = (sha) => `repos/anywear-ai/AnyWear-Service/git/tags/${sha}`;
 
 // #193: the four released names are a frozen constant. Each asset carries the size and the
 // `sha256:<hex>` digest the release API publishes; the body is never fetched.
@@ -38,7 +38,7 @@ function apiFor({ releaseRecord = release, refRecord = ref, tagObjects = {}, fai
     if (fail(path, binary)) throw new Error('gh: Not Found (HTTP 404)');
     if (path === releasePath) return JSON.stringify(releaseRecord);
     if (path === refPath) return JSON.stringify(refRecord);
-    const annotated = /^repos\/git-malu\/AnyWear-Service\/git\/tags\/([0-9a-f]{40})$/.exec(path);
+    const annotated = /^repos\/anywear-ai\/AnyWear-Service\/git\/tags\/([0-9a-f]{40})$/.exec(path);
     if (annotated && Object.hasOwn(tagObjects, annotated[1])) return JSON.stringify(tagObjects[annotated[1]]);
     if (path.includes('/releases/assets/')) throw new Error(`release asset bytes must not be read (${path})`);
     throw new Error(`unexpected GitHub API path ${path}`);
@@ -58,7 +58,7 @@ test('resolves the live Service identity from the release and its tag, reading n
     environment: { SERVICE_ARTIFACT_READ_TOKEN: READ_TOKEN, GH_TOKEN: 'ambient-token', GITHUB_TOKEN: 'workflow-token' },
   });
   assert.deepEqual(result.identity, {
-    repository: 'git-malu/AnyWear-Service',
+    repository: 'anywear-ai/AnyWear-Service',
     release_id: 10,
     tag,
     target_commit: serviceSha,
@@ -81,20 +81,20 @@ test('resolves the live Service identity from the release and its tag, reading n
   }
   // A missing scoped token refuses before any API call.
   await assert.rejects(readServiceRelease({ serviceSha, api: apiFor({ seen }), environment: {} }),
-    /requires the scoped git-malu\/AnyWear-Service token: SERVICE_ARTIFACT_READ_TOKEN required/);
+    /requires the scoped anywear-ai\/AnyWear-Service token: SERVICE_ARTIFACT_READ_TOKEN required/);
 });
 
 test('fails closed when the release, the tag ref or an annotated tag cannot be read', async () => {
-  await assert.rejects(read({ fail: (path) => path.startsWith('repos/git-malu/AnyWear-Service/releases/') }),
-    new RegExp(`Immutable Service release ${tag} could not be read from git-malu/AnyWear-Service`));
+  await assert.rejects(read({ fail: (path) => path.startsWith('repos/anywear-ai/AnyWear-Service/releases/') }),
+    new RegExp(`Immutable Service release ${tag} could not be read from anywear-ai/AnyWear-Service`));
   await assert.rejects(read({ fail: (path) => path === refPath }),
-    new RegExp(`Tag ${tag} could not be read from git-malu/AnyWear-Service \\(gh: Not Found`));
+    new RegExp(`Tag ${tag} could not be read from anywear-ai/AnyWear-Service \\(gh: Not Found`));
   const annotatedSha = 'a'.repeat(40);
   await assert.rejects(read({
     refRecord: { object: { type: 'tag', sha: annotatedSha } },
     tagObjects: { [annotatedSha]: { object: { type: 'commit', sha: serviceSha } } },
     fail: (path) => path === tagObjectPath(annotatedSha),
-  }), new RegExp(`Tag ${tag} annotated tag ${annotatedSha} could not be read from git-malu/AnyWear-Service`));
+  }), new RegExp(`Tag ${tag} annotated tag ${annotatedSha} could not be read from anywear-ai/AnyWear-Service`));
 });
 
 test('refuses a draft, non-immutable or mis-tagged release', async () => {
