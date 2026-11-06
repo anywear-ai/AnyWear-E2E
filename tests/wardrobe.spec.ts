@@ -1,4 +1,5 @@
 import { expect, login, test } from './support/fixtures.js';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   requireEnvironment,
@@ -25,16 +26,35 @@ interface WardrobeItem extends WardrobeStatus {
   category: string;
 }
 
+/** The acceptance answer one upload confirmation returns. */
+interface AcceptedItem {
+  itemId: string;
+  taggingStatus: string;
+}
+
 test.describe('Wardrobe Management @regression @full-stack', () => {
   // This scenario invokes the external VLM. A failed attempt must not be
   // repeated automatically; a leftover is resolved by the reconcile operation
   // inside its 24-hour bound.
   test.describe.configure({ retries: 0 });
 
-  let createdItemId: string | undefined;
+  // Every item this attempt confirmed. They are captured as the confirmations
+  // arrive, so the attempt's teardown owns all of them even when a later product
+  // assertion fails.
+  let createdItemIds: string[] = [];
   let authorization: string | undefined;
   let teardown: DirectTeardown | undefined;
   let productResult: ProductResult = 'skipped';
+
+  // One cleanup operation per scenario: a test registers its own attempt scope,
+  // so the scenarios in this file never share a scope or a lease generation. A
+  // renamed test fails here instead of silently reusing another scenario's scope.
+  const attemptScopes = new Map([
+    ['recovers an idempotent auto-tag request across reloads and browser pages, then edits and deletes it',
+      'wardrobe.spec.ts::recovers-an-idempotent-auto-tag-request'],
+    ['adds two photos in one action and both reach ready without a page reload',
+      'wardrobe.spec.ts::adds-two-photos-in-one-action'],
+  ]);
 
   // A stable numeric lease generation per attempt keeps every retry on a fresh
   // lease fence while staying reproducible within one attempt.
@@ -43,14 +63,18 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
   test.beforeEach(async ({ page, workerAccount }, testInfo) => {
     requireEnvironment('USER_POOL_ID');
     requireEnvironment('VITE_COGNITO_CLIENT_ID');
-    createdItemId = undefined;
+    createdItemIds = [];
     authorization = undefined;
     productResult = 'skipped';
+    const testScope = attemptScopes.get(testInfo.title);
+    if (!testScope) {
+      throw new Error(`No cleanup test scope is declared for the wardrobe scenario ${JSON.stringify(testInfo.title)}`);
+    }
     // Register before the first business side effect, on a scope unique to this
     // attempt so a retry always allocates a fresh operation and lease generation.
     teardown = new DirectTeardown({
       runScope: requireEnvironment('E2E_CLEANUP_RUN_SCOPE'),
-      testScope: 'wardrobe.spec.ts::recovers-an-idempotent-auto-tag-request',
+      testScope,
       retryIndex: testInfo.retry,
       leaseId: randomUUID(),
       leaseGeneration: leaseGenerationFor(`${workerAccount.email}:${testInfo.retry}:${randomUUID()}`),
@@ -63,7 +87,12 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
       testInfo,
     });
     await teardown.register();
+    // Obtain the real Client's bearer header without persisting a token or browser
+    // state. The readback and the teardown deletes reuse it.
+    const authorized = page.waitForRequest(request => new URL(request.url()).pathname === '/users/me'
+      && request.headers().authorization !== undefined);
     await login(page, workerAccount);
+    authorization = (await authorized).headers().authorization;
     // The owner binds only after Cognito confirmation, and only to this subject.
     if (!workerAccount.subject) throw new Error('Login did not capture the confirmed Cognito subject');
     await teardown.bindOwner(workerAccount.subject);
@@ -75,20 +104,23 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
     if (productResult === 'skipped') {
       productResult = testInfo.status === testInfo.expectedStatus ? 'skipped' : 'failed';
     }
-    if (!createdItemId || !authorization) {
+    if (createdItemIds.length === 0 || !authorization) {
       // Nothing was created, so the attempt still acknowledges its own scope.
       await teardown.acknowledge(productResult, 'passed');
       return;
     }
-    teardown.capture('wardrobe_item', createdItemId);
+    for (const id of createdItemIds) teardown.capture('wardrobe_item', id);
     const result = await teardown.finalize(productResult, authorization);
 
-    // Exact absence readback after teardown, independent of the product assertion.
-    const readback = await page.request.get(
-      `${requireEnvironment('E2E_SERVICE_URL')}/wardrobe/items/${createdItemId}`,
-      { headers: { ...CLIENT_VERSION_HEADERS, Authorization: authorization } },
-    );
-    expect(readback.status()).toBe(404);
+    // Exact absence readback after teardown for every captured item, independent
+    // of the product assertion.
+    for (const id of createdItemIds) {
+      const readback = await page.request.get(
+        `${requireEnvironment('E2E_SERVICE_URL')}/wardrobe/items/${id}`,
+        { headers: { ...CLIENT_VERSION_HEADERS, Authorization: authorization } },
+      );
+      expect(readback.status()).toBe(404);
+    }
 
     // A teardown failure fails the separate teardown gate without rewriting the
     // product outcome, and quarantines the scope so the next attempt is fresh.
@@ -146,7 +178,8 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
     const confirmedResponse = await confirmed;
     expect(confirmedResponse.status()).toBe(202);
     const accepted = await readServiceJson<{ itemId: string; taggingStatus: string }>(confirmedResponse);
-    createdItemId = accepted.itemId;
+    createdItemIds = [accepted.itemId];
+    const [createdItemId] = createdItemIds;
     expect(createdItemId).toBeTruthy();
     expect(accepted).toEqual({ itemId: createdItemId, taggingStatus: 'processing' });
     const idempotencyKey = await confirmedResponse.request().headerValue('idempotency-key');
@@ -257,6 +290,124 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
         name: baselineItem.name,
       });
     }
+    // The product assertion stands on its own; teardown runs separately in afterEach.
+    productResult = 'passed';
+  });
+
+  test('adds two photos in one action and both reach ready without a page reload', async ({ page }) => {
+    // Two real auto-tagging tasks run behind the provider on the deployed
+    // platform. The bound covers the Service's nominal retry budget for the batch
+    // and the browser-side render; it is not a latency SLA.
+    test.setTimeout(720_000);
+
+    const serviceUrl = requireEnvironment('E2E_SERVICE_URL');
+    const serviceOrigin = serviceOriginOf(serviceUrl);
+    const serviceJson = (criteria: { method: string; path?: string }) => serviceResponseMatcher(serviceOrigin, criteria);
+    const headers = { ...CLIENT_VERSION_HEADERS, Authorization: authorization! };
+    const photoNames = ['batch-photo-1.png', 'batch-photo-2.png'];
+
+    // The confirmations name the two items. Capture each as it arrives, so the
+    // attempt's teardown owns both even when a later assertion fails.
+    const acceptedItems = new Map<string, AcceptedItem>();
+    const isConfirmation = serviceJson({ method: 'POST', path: '/wardrobe/upload' });
+    page.on('response', (response) => {
+      if (!isConfirmation(response)) return;
+      void readServiceJson<AcceptedItem>(response).then((accepted) => {
+        if (typeof accepted?.itemId !== 'string' || accepted.itemId.length === 0) return;
+        acceptedItems.set(accepted.itemId, accepted);
+        if (!createdItemIds.includes(accepted.itemId)) createdItemIds.push(accepted.itemId);
+      }, () => undefined);
+    });
+
+    const initialWardrobe = page.waitForResponse(serviceJson({ method: 'GET', path: '/wardrobe' }));
+    await page.goto('/wardrobe');
+    await expect(page.getByRole('heading', { name: 'Wardrobe' })).toBeVisible();
+    const initialWardrobeResponse = await initialWardrobe;
+    expect(initialWardrobeResponse.status()).toBe(200);
+    const baselineItems = await readServiceJson<WardrobeItem[]>(initialWardrobeResponse);
+
+    // The assertion below is that readiness arrives on the document that is
+    // already open: a reload would record a second load, and this scenario never
+    // asks for one.
+    let documentLoads = 0;
+    page.on('load', () => { documentLoads += 1; });
+
+    await page.getByRole('button', { name: 'Add Item' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Add Wardrobe Item', exact: true });
+    await expect(dialog).toBeVisible();
+
+    // One action: both photos enter the dialog from one selection, and the
+    // submit button names the batch it will add.
+    const photoBytes = readFileSync(uploadFixture);
+    await page.locator('input[type="file"][multiple]').setInputFiles(photoNames.map((name) => ({
+      name,
+      mimeType: 'image/png',
+      buffer: photoBytes,
+    })));
+    const rows = dialog.getByRole('list', { name: 'Added photos' }).getByRole('listitem');
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText(photoNames[0]);
+    await expect(rows.nth(1)).toContainText(photoNames[1]);
+    const addPhotos = dialog.getByRole('button', { name: 'Add 2 items', exact: true });
+    await expect(addPhotos).toBeVisible();
+    await addPhotos.click();
+
+    await expect.poll(() => acceptedItems.size, { timeout: 120_000 }).toBe(2);
+    const accepted = [...acceptedItems.values()];
+    for (const item of accepted) {
+      expect(item.taggingStatus).toBe('processing');
+      // The dialog reports which wardrobe item each photo became.
+      await expect(dialog.getByText(`Item ${item.itemId}`)).toBeVisible();
+    }
+
+    // Both rows leave processing on the same open page. The dialog reads an
+    // item's live status from the wardrobe list the page's status stream
+    // advances, so a row leaving `processing` here is exactly the delivery this
+    // scenario observes; a silently failed delivery would sit on `Tagging
+    // processing` until the wait expires.
+    for (let index = 0; index < 2; index += 1) {
+      await expect(rows.nth(index).getByText('Tagging ready')).toBeVisible({ timeout: 600_000 });
+    }
+    await expect(dialog.getByRole('status')).toHaveText('2 items added, 0 failed');
+
+    expect(documentLoads).toBe(0);
+    expect(new URL(page.url()).pathname).toBe('/wardrobe');
+
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+
+    // Both confirmed items are in the wardrobe list and terminal `ready`, and the
+    // list gained exactly those two items over the pre-run baseline.
+    const wardrobeResponse = await page.request.get(`${serviceUrl}/wardrobe`, { headers });
+    expect(wardrobeResponse.status()).toBe(200);
+    const items = await readServiceJson<WardrobeItem[]>(wardrobeResponse);
+    const createdIds = [...new Set(createdItemIds)];
+    expect(createdIds).toHaveLength(2);
+    expect(items.map((item) => item.id)).toEqual(expect.arrayContaining([...createdIds, ...baselineItems.map((item) => item.id)]));
+    expect(items).toHaveLength(baselineItems.length + 2);
+    const created = items.filter((item) => createdIds.includes(item.id));
+    expect(created.map((item) => item.id).sort()).toEqual([...createdIds].sort());
+    for (const item of created) {
+      expect(item.taggingStatus).toBe('ready');
+      expect(item.taggingStateVersion).toBeGreaterThanOrEqual(1);
+    }
+
+    // The rendered list holds every item the Service lists, and neither created
+    // card is still waiting or failed: both readinesses were applied in place.
+    const labelOf = (item: WardrobeItem) => item.name || item.category || 'wardrobe item';
+    const cards = page.locator('article').filter({ has: page.getByRole('button', { name: /^View .+ details$/ }) });
+    await expect(cards).toHaveCount(items.length);
+    for (const item of created) {
+      const label = labelOf(item);
+      const occurrences = items.filter((candidate) => labelOf(candidate) === label).length;
+      const card = page.getByRole('button', { name: `View ${label} details`, exact: true });
+      await expect(card).toHaveCount(occurrences);
+      await expect(card.first()).toBeEnabled();
+      await expect(card.first().getByText('Analyzing...')).not.toBeVisible();
+      await expect(card.first().getByText('Failed', { exact: true })).not.toBeVisible();
+    }
+
+    expect(documentLoads).toBe(0);
     // The product assertion stands on its own; teardown runs separately in afterEach.
     productResult = 'passed';
   });

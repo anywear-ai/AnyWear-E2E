@@ -23,6 +23,12 @@ const EVENT_FIELDS = {
   stream_open: ['requestId', 'streamId', 'taskType', 'resourceId', 'activeStreams'],
   stream_snapshot: ['requestId', 'streamId', 'taskType', 'resourceId', 'stateVersion', 'terminal'],
   stream_close: ['requestId', 'streamId', 'taskType', 'resourceId', 'reason', 'activeStreams'],
+  // Issue 277's owner-scoped aggregate stream has no resource identity: its
+  // evidence carries the owner scope and counts only. These are deliberately
+  // not `stream_*` events, so `attributeEvents` keeps ignoring them.
+  owner_stream_open: ['requestId', 'streamId', 'scope', 'activeStreams'],
+  owner_stream_snapshot: ['requestId', 'streamId', 'scope', 'frames', 'inFlight'],
+  owner_stream_close: ['requestId', 'streamId', 'scope', 'reason', 'activeStreams'],
 };
 
 function object(value, label) {
@@ -160,17 +166,25 @@ function parseOperational(event, config) {
   if (parsed.level !== undefined) integer(parsed.level, 'Pino level');
   if (parsed.pid !== undefined) integer(parsed.pid, 'Pino PID', 1);
   if (parsed.hostname !== undefined) match(parsed.hostname, /^[a-zA-Z0-9._-]{1,255}$/, 'Pino hostname');
-  for (const field of ['activeStreams', 'reconnectCount', 'listenerGeneration', 'stateVersion']) {
+  for (const field of ['activeStreams', 'reconnectCount', 'listenerGeneration', 'stateVersion', 'frames', 'inFlight']) {
     if (Object.hasOwn(parsed, field)) integer(parsed[field], field, field === 'stateVersion' ? 1 : 0);
   }
   if (parsed.event.startsWith('stream_')) {
     match(parsed.requestId, REQUEST_ID, 'request ID');
     match(parsed.streamId, UUID, 'stream ID');
   }
+  // The owner-scoped events must stay exactly as strict as the per-request ones:
+  // a literal owner scope and the same bounded identities, with no resource or
+  // task field to loosen them.
+  if (parsed.event.startsWith('owner_stream_')) {
+    if (parsed.scope !== 'owner') throw new Error('Invalid owner stream scope');
+    match(parsed.requestId, REQUEST_ID, 'request ID');
+    match(parsed.streamId, UUID, 'stream ID');
+  }
   if (Object.hasOwn(parsed, 'taskType') && !TASK_TYPES.includes(parsed.taskType)) throw new Error('Invalid operational task type');
   for (const field of ['taskId', 'resourceId']) if (Object.hasOwn(parsed, field)) match(parsed[field], UUID, field);
   if (Object.hasOwn(parsed, 'terminal') && typeof parsed.terminal !== 'boolean') throw new Error('Invalid terminal flag');
-  if (parsed.event === 'stream_close' && !CLOSE_REASONS.includes(parsed.reason)) throw new Error('Invalid stream close reason');
+  if ((parsed.event === 'stream_close' || parsed.event === 'owner_stream_close') && !CLOSE_REASONS.includes(parsed.reason)) throw new Error('Invalid stream close reason');
   if (parsed.event === 'listener_probe') {
     if (typeof parsed.ready !== 'boolean' || !Number.isFinite(parsed.durationMs) || parsed.durationMs < 0
       || parsed.durationMs > SSE_ATTRIBUTION_LIMITS.windowMs || (parsed.ready ? parsed.failureKind !== undefined : !FAILURE_KINDS.includes(parsed.failureKind))) throw new Error('Invalid listener probe');

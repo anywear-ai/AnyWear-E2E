@@ -99,20 +99,20 @@ agreeing about the invocations that exist.
 | Declared title | `Wardrobe Management @regression @full-stack` |
 | Policy class | Full deployed system E2E |
 | Tags | `@regression @full-stack` |
-| Intent | A wardrobe item survives the real auto-tagging pipeline: the upload is confirmed idempotently before and after the terminal state, tagging reaches `ready` with a monotonic state version across a reload and a second browser page, the item can be edited, and deletion removes it without disturbing items that pre-date the run |
+| Intent | A wardrobe item survives the real auto-tagging pipeline: the upload is confirmed idempotently before and after the terminal state, tagging reaches `ready` with a monotonic state version across a reload and a second browser page, the item can be edited, and deletion removes it without disturbing items that pre-date the run. The batch scenario adds two photos in one action through the Add Item dialog and requires both items to appear in the wardrobe list and both to reach terminal `ready` on the page that is already open, with no reload |
 | Current caller | The `full` operation of the protected `qualify` entry, through the release-gating selection. `test:smoke` does not select it |
 | Assertion boundary | Deployed Client UI and Service HTTP API together, with the Service's real provider call in the path |
-| Actual operation | Leases a synthetic Cognito identity, signs in through the real Client, presigned-uploads a fixture to S3, creates and mutates a wardrobe item, and invokes the external VLM |
+| Actual operation | Leases a synthetic Cognito identity, signs in through the real Client, presigned-uploads one fixture for the idempotency scenario or two fixtures in a single add action for the batch scenario to S3, creates and mutates wardrobe items, and invokes the external VLM |
 | Owner | AnyWear-E2E maintainers |
 | Lifecycle | Current; retired only with a caller and lifecycle decision per the policy's retention rules |
 | Command | `pnpm test:regression`, and `pnpm test` because the suite step runs the same selection |
 | Default trigger | The `full` operation of the `qualify` entry, whose selection this scenario is part of |
-| Cost | External write and paid provider cost: one identity, one uploaded object, one tagging task per attempt. Not separately metered |
-| Side effects | Application rows, an S3 object, provider spend, and a Cognito identity |
+| Cost | External write and paid provider cost: one identity, and either one uploaded object and one tagging task (the idempotency scenario) or two uploaded objects and two tagging tasks (the batch scenario) per attempt. Not separately metered |
+| Side effects | Application rows, one or two S3 objects, provider spend, and a Cognito identity |
 | Evidence level | Qualification, when the complete selection and the pre/post identity checks pass |
 | Disposition | Retain |
-| Cleanup contract | `DirectTeardown` against the attempt's own `run_scope`/`test_scope`: register before the first business side effect, bind the owner subject, capture the created `wardrobe_item`, then finalize with the attempt's own authorization. The scenario reads back exact absence (HTTP 404) independently of the product assertion, and a teardown that is not `passed` retains the scope and fails a separate gate. The worker-lease fixture then deletes the Cognito identity and releases the lease |
-| Verification rationale | The product assertion stands alone; teardown is reported beside it and never rewrites it. A red result means a product defect or a provider failure — the scenario requires a terminal `ready`, so a provider failure cannot pass by the processing indicator disappearing. `retries: 0` is configured, because a failed provider attempt must not be repeated automatically and the reconcile operation owns non-terminal resources |
+| Cleanup contract | `DirectTeardown` against the attempt's own `run_scope`/`test_scope`: register before the first business side effect, bind the owner subject, capture every created `wardrobe_item` as it is confirmed, then finalize with the attempt's own authorization. The scenarios read back exact absence (HTTP 404) for every captured item, independently of the product assertion, and a teardown that is not `passed` retains the scope and fails a separate gate. The worker-lease fixture then deletes the Cognito identity and releases the lease |
+| Verification rationale | The product assertion stands alone; teardown is reported beside it and never rewrites it. A red result means a product defect or a provider failure — the scenarios require a terminal `ready`, so a provider failure cannot pass by the processing indicator disappearing. The batch scenario fails unless both rows leave processing on the open page, asserts the list gained exactly the two confirmed items, and counts document loads so a reload cannot stand in for the live delivery. `retries: 0` is configured, because a failed provider attempt must not be repeated automatically and the reconcile operation owns non-terminal resources |
 | Red result means | A release-gating product failure. It is not a measurement: no measurement failure can produce it, and it cannot be excused as one |
 
 ### `tests/auth-startup.spec.ts`

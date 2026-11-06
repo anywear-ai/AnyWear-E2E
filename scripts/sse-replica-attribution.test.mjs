@@ -7,6 +7,10 @@ const WINDOW = { startTime: new Date(START).toISOString(), endTime: new Date(STA
 const RESOURCE_IDS = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
 const REQUEST_IDS = ['sse-request-one', 'sse-request-two'];
 const STREAM_IDS = ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'];
+// Issue 277's owner-scoped aggregate stream: one stream per caller, no resource
+// identity, so it never matches a request in `expectedRequests`.
+const OWNER_REQUEST_ID = 'sse-owner-request';
+const OWNER_STREAM_ID = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const TASK_IDS = ['a'.repeat(32), 'b'.repeat(32)];
 const IMAGE_DIGEST = `sha256:${'c'.repeat(64)}`;
 const SERVICE_COMMIT = 'd'.repeat(40);
@@ -71,6 +75,20 @@ function lifecycle(requestIndex, options = {}) {
     ...(options.close === false ? [] : [line('stream_close', requestIndex, START + 1200 + requestIndex * 1000, options.closeExtra)])];
 }
 
+// The owner-scoped events the Service emits for `GET /wardrobe/status/stream`
+// (issue 277). They carry counts only: no taskType and no resourceId.
+function ownerLine(event, timestamp = START + 1500, extra = {}) {
+  const fields = {
+    component: 'task-status-sse', stage: 'beta', event, time: timestamp,
+    scope: 'owner', requestId: OWNER_REQUEST_ID, streamId: OWNER_STREAM_ID,
+    ...(['owner_stream_open', 'owner_stream_close'].includes(event) ? { activeStreams: 1 } : {}),
+    ...(event === 'owner_stream_snapshot' ? { frames: 2, inFlight: 1 } : {}),
+    ...(event === 'owner_stream_close' ? { reason: 'client_abort' } : {}),
+    ...extra,
+  };
+  return { timestamp, message: JSON.stringify({ level: 30, time: timestamp, msg: 'SSE operational event', ...fields }) };
+}
+
 function pageReader(byStream, { enforceDerivedStreams = true } = {}) {
   const calls = [];
   const readPage = async (query) => {
@@ -112,6 +130,42 @@ test('collector binds immutable Beta sources and emits exact per-request replica
   assert.equal(new Set(calls.map((query) => query.logStream)).size, 2);
   assert.equal(calls.length, 4);
   assert.strictEqual(validateSseReplicaAttribution(evidence, source), evidence);
+});
+
+test('an owner-scoped stream lifecycle is tolerated and changes no attribution evidence', async () => {
+  const source = input();
+  const baseline = await collectSseReplicaAttribution(source, pageReader(captures([lifecycle(0), lifecycle(1)])).readPage);
+
+  // The owner-scoped lifecycle interleaves with the per-request one in the same
+  // captured stream. It must be parsed strictly and then ignored, so the evidence
+  // is exactly what the same capture without it yields.
+  const interleaved = [
+    line('stream_open', 0),
+    ownerLine('owner_stream_open', START + 1050),
+    line('stream_snapshot', 0, START + 1100),
+    ownerLine('owner_stream_snapshot', START + 1150),
+    line('stream_close', 0, START + 1200),
+    ownerLine('owner_stream_close', START + 1250),
+  ];
+  const evidence = await collectSseReplicaAttribution(source, pageReader(captures([interleaved, lifecycle(1)])).readPage);
+
+  assert.deepEqual(evidence, baseline);
+  assert.deepEqual(evidence.distinctApiTaskArns, [...TASK_ARNS].sort());
+  assert.equal(evidence.attributions.length, 2);
+});
+
+test('owner-scoped events stay strict about their name, fields, scope, counters and close reason', async (t) => {
+  const refused = async (event, extra, pattern) => {
+    const { readPage } = pageReader(captures([[ownerLine(event, START + 1050, extra)], lifecycle(1)]));
+    await assert.rejects(collectSseReplicaAttribution(input(), readPage), pattern);
+  };
+
+  await t.test('unknown owner event name', () => refused('owner_stream_reconnect', {}, /Foreign or unknown SSE operational event/));
+  await t.test('unexpected owner field', () => refused('owner_stream_open', { resourceId: RESOURCE_IDS[0] }, /Unexpected or missing operational event fields/));
+  await t.test('non-owner scope', () => refused('owner_stream_open', { scope: 'resource' }, /Invalid owner stream scope/));
+  await t.test('invalid close reason', () => refused('owner_stream_close', { reason: 'owner_done' }, /Invalid stream close reason/));
+  await t.test('invalid owner counter', () => refused('owner_stream_snapshot', { frames: -1 }, /Invalid frames/));
+  await t.test('invalid owner identity', () => refused('owner_stream_open', { streamId: 'not-a-uuid' }, /Invalid stream ID/));
 });
 
 test('collector accepts exact page and ECR repository bounds', async () => {
