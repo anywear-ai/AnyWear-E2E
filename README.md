@@ -310,7 +310,7 @@ without `environment: beta` cannot resolve environment-scoped variables. If a di
 ever recreated, the constants move with it in one reviewed change.
 
 The only committed input on the live path is
-[`minimum-supported-client.json`](minimum-supported-client.json): `{ "version": 6 }`. It
+[`minimum-supported-client.json`](minimum-supported-client.json): `{ "version": 7 }`. It
 states the reviewed Client floor version only — the Client commit it used to name was read
 by the deleted oldest-Client leg. Its `version` must equal the live Service's
 `minimum_client_version`, and a disagreement is refused — never resolved by picking the
