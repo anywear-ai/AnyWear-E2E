@@ -20,10 +20,13 @@ test.describe('Worker account smoke @smoke @regression @full-stack', () => {
     declareNoBusinessCleanup(testInfo, { teardownResult: 'passed', reason: 'this attempt creates no business resources' });
 
     // Observe the first profile read of this attempt's own synthetic identity.
-    // The listener is registered before sign-in, because the binding is decided
-    // by that first `GET /users/me`: it is the request that syncs the Cognito
-    // subject to its profile row, and the one that answered 409 while a fixed
-    // worker address was still owned by an earlier attempt's subject.
+    // The listener is registered before sign-in so that first `GET /users/me` is
+    // never missed. It is a pure read of a row that already exists:
+    // `provisionConfirmedTestAccount` created it through
+    // `POST /identity-operations/provision` before sign-in (issue #230), so the
+    // response is not the request that syncs the subject to a profile row, and
+    // a non-200 here is a real binding failure rather than this attempt's own
+    // write-on-read.
     const serviceOrigin = new URL(requireEnvironment('E2E_SERVICE_URL')).origin;
     const profile = page.waitForResponse((response) => (
       response.request().method() === 'GET'

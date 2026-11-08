@@ -119,7 +119,7 @@ export interface RegisterResponse {
   replayed: boolean;
 }
 
-export const MACHINE_AUTH_CAPABILITIES = ['operation:register', 'operation:bind', 'operation:acknowledge'] as const;
+export const MACHINE_AUTH_CAPABILITIES = ['operation:register', 'operation:bind', 'operation:acknowledge', 'identity:provision'] as const;
 export type MachineAuthCapability = typeof MACHINE_AUTH_CAPABILITIES[number];
 
 const DEFAULT_TTL_MS = 120_000;

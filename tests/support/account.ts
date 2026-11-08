@@ -17,6 +17,7 @@ import {
   type AccountMode,
 } from './account-budget.ts';
 import { workerPoolAddress } from './beta-address.ts';
+import { machineAuthHeaders } from './cleanup-operation.ts';
 
 export interface TestAccount {
   email: string;
@@ -26,6 +27,34 @@ export interface TestAccount {
 }
 
 const DEFAULT_TEST_PASSWORD = 'TestPassword123!';
+
+/**
+ * The two outcomes `POST /identity-operations/provision` reports as success
+ * (issue #230). `already_provisioned` means the PostConfirmation trigger
+ * happened to fire first, so the harness does not depend on whether it fired:
+ * either outcome leaves the row present before the browser opens.
+ */
+const PROVISIONED_OUTCOMES: readonly string[] = ['provisioned', 'already_provisioned'];
+
+/** The response contract of the audited provisioning entry point (issue #230). */
+interface ProvisionResponse {
+  outcome?: string;
+  subject?: string;
+  row_id?: string;
+  error?: string;
+}
+
+/**
+ * A Service error code and a provisioning outcome are fixed vocabulary
+ * identifiers. Only a value of that shape may be copied into a failure message;
+ * everything else reports as `unknown`, so no response body, message, token or
+ * secret is ever echoed into a test result.
+ */
+const MACHINE_VOCABULARY = /^[A-Za-z][A-Za-z0-9_:-]{0,63}$/;
+
+function machineVocabulary(value: unknown): string | undefined {
+  return typeof value === 'string' && MACHINE_VOCABULARY.test(value) ? value : undefined;
+}
 
 export function requireEnvironment(name: string): string {
   const value = process.env[name];
@@ -147,6 +176,59 @@ export async function provisionConfirmedTestAccount(account: TestAccount): Promi
     if (user.UserStatus !== 'CONFIRMED') {
       assertE2EExecution();
       await client.send(new AdminConfirmSignUpCommand({ UserPoolId: userPoolId, Username: account.email }));
+    }
+    // Cognito does not invoke the PostConfirmation trigger for an identity
+    // created with `AdminCreateUser`, so this mirror row is created out of band
+    // through issue #230's audited entry point. One signed call names exactly
+    // this subject and the Service runs the same `syncUserToDb` the trigger
+    // would. The Service never retries a provisioning call, so this is exactly
+    // one attempt, and a failure is retained with its reason below instead of
+    // surfacing later as a 409 on the worker's first profile read.
+    const subject = account.subject;
+    if (!subject) throw new Error(`The confirmed E2E account has no recorded Cognito subject: ${account.email}`);
+    const provisioningBody = JSON.stringify({ sub: subject, email: account.email, email_verified: true });
+    let provisioningResponse: Response;
+    try {
+      provisioningResponse = await fetch(requireEnvironment('E2E_SERVICE_URL') + '/identity-operations/provision', {
+        method: 'POST',
+        // The `/identity-operations` prefix is client-version exempt, so this
+        // machine call carries no `X-AnyWear-Client-Version`, like the cleanup
+        // operation calls.
+        headers: machineAuthHeaders('identity:provision', provisioningBody),
+        body: provisioningBody,
+        // The 30-second budget one audited provisioning call shares with the
+        // PostConfirmation Lambda.
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (error) {
+      throw new Error(
+        `E2E account provisioning request failed for ${account.email}: ${error instanceof Error ? error.message : 'unknown error'}`,
+        { cause: error },
+      );
+    }
+    const provisioningStatus = provisioningResponse.status;
+    let provisioningResult: unknown;
+    try { provisioningResult = await provisioningResponse.json(); } catch { provisioningResult = undefined; }
+    const result = typeof provisioningResult === 'object' && provisioningResult !== null
+      ? provisioningResult as ProvisionResponse
+      : undefined;
+    const outcome = machineVocabulary(result?.outcome);
+    const errorCode = machineVocabulary(result?.error);
+    if (provisioningStatus !== 200) {
+      throw new Error(
+        `E2E account provisioning refused for ${account.email}: HTTP ${provisioningStatus} (error ${errorCode ?? 'unknown'})`,
+      );
+    }
+    if (outcome === undefined || !PROVISIONED_OUTCOMES.includes(outcome)) {
+      throw new Error(
+        `E2E account provisioning returned an unusable outcome for ${account.email}: HTTP ${provisioningStatus} (outcome ${outcome ?? 'unknown'})`,
+      );
+    }
+    const rowId = result?.row_id;
+    if (result?.subject !== subject || typeof rowId !== 'string' || rowId.length === 0) {
+      throw new Error(
+        `E2E account provisioning returned a malformed body for ${account.email}: HTTP ${provisioningStatus} (outcome ${outcome})`,
+      );
     }
     await markAccountInUse(account.email);
   } catch (error) {
