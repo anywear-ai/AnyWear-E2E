@@ -512,12 +512,21 @@ test('a witness that fails any binding is refused, never partially accepted', as
   // not a source at all.
   const base = operationRecord();
   const live = liveTaskEntries();
+  // The two task identities are swapped in the *output* only, so `validateResult` still accepts it
+  // (both remain valid, distinct, stopped, successful ARNs under their own prefixes) and the
+  // `isDeepStrictEqual(record.operation.output, output)` binding is the only thing that can refuse
+  // the variant.
+  const swapped = output();
   const variants = [
     ['envelope hash', { ...base, operation: { ...base.operation, input_sha256: 'c'.repeat(64) } }],
     ['envelope bytes', { ...base, operation: { ...base.operation, input: { ...envelope, service_commit_sha: 'c'.repeat(40) } } }],
     ['execution name', { ...base, operation: { ...base.operation, execution_name: `${name0}x` } }],
     ['execution arn', { ...base, operation: { ...base.operation, execution_arn: `${arn0}x` } }],
-    ['output', { ...base, operation: { ...base.operation, output: { ...output(), request_sha256: 'f'.repeat(64) } } }],
+    ['output binding', { ...base, operation: { ...base.operation, output: { ...output(), request_sha256: 'f'.repeat(64) } } },
+      'Cleanup task output has a foreign operation/artifact binding'],
+    ['output identity', { ...base, operation: { ...base.operation, output: { ...swapped,
+      verification_task_arn: swapped.cleanup_task_arn, cleanup_task_arn: swapped.verification_task_arn } } },
+      'Artifact witness does not carry the observed execution output'],
     ['instance', { ...base, operation: { ...base.operation, stopped_at: '2026-10-10T00:00:09.000Z' } }],
     ['task identity', { ...base, operation: { ...base.operation, tasks: [live[1], live[0]] } }],
     ['committed counters', { ...base, operation: { ...base.operation, committed_result: committed({ transaction_committed: false }) } }],
@@ -525,10 +534,16 @@ test('a witness that fails any binding is refused, never partially accepted', as
     ['foreign schema', { ...base, schema_version: 5 }],
     ['refused source', { ...base, operation: { ...base.operation, proof_status: 'refused' } }],
   ];
-  for (const [label, record] of variants) {
+  for (const [label, record, expectedCause] of variants) {
     await run({ existing: { 0: 'SUCCEEDED' }, missing: ['verification', 'cleanup'],
       logs: () => ({ events: [], nextForwardToken: 'end' }), verify: async (execute, _io, path) => {
-        await assert.rejects(execute(), /identities retained/, label);
+        await assert.rejects(execute(), (error) => {
+          assert.match(error.message, /identities retained/, label);
+          // Naming the cause pins which binding refused the variant: the output-identity case must
+          // fail on the identity check, not on `validateResult`.
+          if (expectedCause) assert.equal(error.cause?.message, expectedCause, label);
+          return true;
+        }, label);
         const operation = JSON.parse(await readFile(path, 'utf8')).operation;
         assert.equal(operation.refusal_phase, 'task_proof', label);
         assert.equal(operation.refusal_category, 'task_proof_unavailable', label);

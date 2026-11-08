@@ -1585,6 +1585,23 @@ test('a lifecycle artifact diagnostic is a witness source at no extra read', asy
   assert.equal(run.record.identities[0].outcome, 'already_absent');
 });
 
+test('a corrupt lifecycle cleanup diagnostic is skipped, not a source failure', async () => {
+  // The diagnostics were ignored before #224, so a corrupt one contributes no witness and must not
+  // turn an otherwise valid reconcile into a source failure; the skip is logged.
+  const lifecycle = artifactFixture(0, { runId: 123,
+    manifest: manifestFixture(123, 1, [manifestRecord({ subject: subject(1) })]).manifest });
+  lifecycle.entries = lifecycle.entries.map((entry) => entry.name === 'service-cleanup-operation.json'
+    ? { ...entry, bytes: Buffer.from('{not-json') } : entry);
+  const harnessed = harness({ artifacts: [lifecycle], users: [{ email: stable(0), sub: subject(1) }] });
+  const logs = [];
+  const { record, result } = await reconcileAccounts({
+    io: harnessed.io, now: NOW, runIdentity, window: reconcileWindow(NOW), environment: {}, log: (line) => logs.push(line),
+  });
+  assert.equal(result, 'passed');
+  assert.equal(record.identities[0].outcome, 'reconciled');
+  assert.equal(logs.some((line) => line.includes(`ignored an unreadable cleanup diagnostic in ${lifecycle.entry.name}`)), true);
+});
+
 test('the witness lookup reads at most forty candidate artifacts per execution', async () => {
   const artifacts = [retainedFixture(), ...Array.from({ length: RECONCILE_WITNESS_ARTIFACT_READS + 1 },
     (_, index) => reconcileArtifactFixture(100 + index, { runId: 500 + index }))];
@@ -1592,6 +1609,36 @@ test('the witness lookup reads at most forty candidate artifacts per execution',
   assert.equal(run.getWitness(), undefined);
   const reconcileReads = run.harnessed.calls.filter((call) => typeof call.artifact === 'number' && call.artifact > 100);
   assert.equal(reconcileReads.length, RECONCILE_WITNESS_ARTIFACT_READS);
+});
+
+test('a witness resolves from the rows the production collector builds, not a hand-written row', async () => {
+  // Regression: `collectLifecycleArtifacts` is the production listing, and the lookup filters on
+  // `expired === false`. A collected row that dropped the flag silently closed the artifact tier
+  // in production and re-created the exact #224 defect once the marker's retention passed.
+  const lifecycle = retainedFixture();
+  const record = cleanupRecord();
+  const reconcileArtifact = reconcileArtifactFixture(10, { runId: 400,
+    records: [{ file: 'service-cleanup-0-123-1-0123456789abcdef.json', record }] });
+  const window = reconcileWindow(NOW);
+  const collected = await collectLifecycleArtifacts({ window,
+    fetchPage: artifactPages([lifecycle.entry, reconcileArtifact.entry]) });
+  const reconcileRow = collected.find((row) => row.name === reconcileArtifact.entry.name);
+  assert.equal(reconcileRow.expired, false, 'the collector row must state the flag the lookup filters on');
+  let witness;
+  const harnessed = harness({ artifacts: [lifecycle, reconcileArtifact], users: [],
+    cleanup: async (_inputs, _environment, options) => {
+      witness = await options.recovery(WITNESS_EXECUTION, WITNESS_STOPPED_AT);
+      return witness ? { proof_status: 'verified', committed_result: committedResult() } : { proof_status: 'refused' };
+    } });
+  const { record: reconcileRecord, result } = await reconcileAccounts({
+    io: { ...harnessed.io, async listArtifacts() { return collected; } },
+    now: NOW, runIdentity, window, environment: {},
+  });
+  assert.equal(result, 'passed');
+  assert.equal(witness.record.operation.execution_name, WITNESS_EXECUTION);
+  assert.equal(witness.source.artifact_name, reconcileArtifact.entry.name);
+  assert.equal(reconcileRecord.identities[0].outcome, 'already_absent');
+  assert.deepEqual(reconcileRecord.unresolved, []);
 });
 
 test('the ordinary teardown passes no witness lookup, and a live reconcile never reads one', async () => {

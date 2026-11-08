@@ -60,8 +60,8 @@ rather than truncating.
   `account-budget-oldest-client.json`, `service-cleanup-operation.json` and
   `service-cleanup-run.json`. The smoke artifact carries the first, third and fourth. Every
   `account-budget*.json` present is read as a manifest, so the addresses feed one identity
-  set; the two cleanup diagnostics are read only when one is needed as a durable cleanup
-  witness, as described below. The oldest-client manifest is no longer
+  set; `service-cleanup-operation.json` is indexed as a durable cleanup witness source, and
+  `service-cleanup-run.json` is not read. The oldest-client manifest is no longer
   produced for new runs since #256 removed the oldest-Client leg, but it stays in the closed
   set because runs recorded before that change still uploaded it. Any other name, a
   directory, a symlink, a duplicate or an over-bound file refuses the artifact. No specific

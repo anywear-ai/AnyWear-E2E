@@ -316,6 +316,11 @@ export async function collectLifecycleArtifacts({ window, fetchPage, pageSize = 
         name: artifact.name,
         digest: requireLifecycleArtifactDigest(artifact.digest, `Lifecycle artifact ${artifact.name}`),
         created_at: artifact.created_at,
+        // The listing has already dropped every expired artifact; the row carries the flag so a
+        // consumer can re-check the same bound without knowing it read the collector (#224). The
+        // durable witness lookup requires `expired === false`, and a hand-built row that lost the
+        // flag closed the artifact tier in production.
+        expired: false,
         workflow_run: artifact.workflow_run,
       };
       // The two families are partitioned here, before anything is read, so each keeps its own
@@ -398,11 +403,12 @@ export function classifyReconcileArchive(entries) {
 /**
  * The artifact list's own binding to the protected run.
  *
- * A lifecycle-named artifact is authoritative only when its name's run is the run the artifact
- * API reports, that run is on `main`, and the artifact and its head repository are this
- * repository. A run's conclusion is deliberately not required: a failed or cancelled run's
- * manifest is exactly the leftover this operation must read. An artifact that fails this
- * binding is ignored and counted, never authoritative.
+ * A lifecycle- or reconcile-named artifact is authoritative only when its name's run is the run
+ * the artifact API reports, that run is on `main`, and the artifact and its head repository are
+ * this repository. A run's conclusion is deliberately not required: a failed or cancelled run's
+ * manifest is exactly the leftover this operation must read, and its reconcile artifact may still
+ * carry a verified cleanup record. A lifecycle artifact that fails this binding is ignored and
+ * counted; a reconcile artifact that fails it is simply not a witness candidate.
  */
 export function lifecycleArtifactBinding(artifact) {
   const parsed = parseManifestArtifactName(artifact?.name) ?? parseReconcileArtifactName(artifact?.name);
