@@ -151,6 +151,23 @@ test('the attempt reserves its lease before provisioning and the bootstrap marke
   assert.doesNotMatch(source, /registerAndLogin|deleteTestAccount|createTestAccount/);
 });
 
+test('the confirmed account row is provisioned out of band before the lease is marked in use', async () => {
+  // Issue #230: an identity created with `AdminCreateUser` never fires the
+  // PostConfirmation trigger, so the harness itself creates the mirror row
+  // through the audited machine-authenticated entry point, before sign-in.
+  const source = await readFile(new URL('../tests/support/account.ts', import.meta.url), 'utf8');
+  assert.match(source, /\/identity-operations\/provision/, 'the row is created by the audited entry point');
+  assert.match(source, /machineAuthHeaders\('identity:provision',/, 'the call carries its own machine capability');
+  const confirm = source.indexOf('new AdminConfirmSignUpCommand(');
+  // The entry point is also named in prose above the sequence, so ordering is
+  // measured from the confirmation onward: the first occurrence after it is the
+  // request itself.
+  const provision = source.indexOf('/identity-operations/provision', confirm);
+  const inUse = source.indexOf('await markAccountInUse(account.email)');
+  assert.ok(confirm >= 0 && provision > confirm, 'provisioning must follow the confirmation that precedes it');
+  assert.ok(inUse > provision, 'the lease is marked in use only after the row exists');
+});
+
 test('workerSlotOffset is the single offset validation', () => {
   assert.equal(workerSlotOffset({}, 2), 0);
   assert.equal(workerSlotOffset({ E2E_WORKER_SLOT_OFFSET: '6' }, 2), 6);
