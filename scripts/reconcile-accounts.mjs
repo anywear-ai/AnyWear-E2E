@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
+import { promisify, isDeepStrictEqual } from 'node:util';
 import {
   AdminDeleteUserCommand,
   AdminGetUserCommand,
@@ -64,6 +64,15 @@ export const RECONCILE_LOOKBACK_DAYS = Object.freeze([RECONCILE_WINDOW_DAYS, REC
 /** At most nine lifecycle artifacts per lookback day; the listing fails closed above it. */
 export const RECONCILE_ARTIFACTS_PER_DAY = 9;
 /**
+ * The reconcile family's own per-day listing bound (#224). A reconcile run uploads one
+ * `beta-account-reconcile-<run>-<attempt>` artifact, so nine a day is ample for the pre-suite and
+ * scheduled dispatches; the bound exists so a runaway repository cannot turn the witness lookup
+ * into an unbounded walk. It counts a different population from the lifecycle bound above.
+ */
+export const RECONCILE_RECORD_ARTIFACTS_PER_DAY = 9;
+/** The durable witness lookup reads at most this many candidate artifacts per execution (#224). */
+export const RECONCILE_WITNESS_ARTIFACT_READS = 40;
+/**
  * The migration window must start marginally inside CloudTrail's 90-day history: `LookupEvents`
  * accepts only the last 90 days, and a range that starts exactly at `now - 90 days` is often
  * already outside it by the time the request is evaluated. Five minutes is enough for the clock
@@ -78,6 +87,10 @@ export const DEFAULT_RECONCILE_DEADLINE_SECONDS = 720;
 export const LIFECYCLE_MANIFESTS = Object.freeze(['account-budget.json', 'account-budget-oldest-client.json']);
 export const LIFECYCLE_DIAGNOSTICS = Object.freeze(['service-cleanup-operation.json', 'service-cleanup-run.json']);
 export const LIFECYCLE_UPLOAD_SET = Object.freeze([...LIFECYCLE_MANIFESTS, ...LIFECYCLE_DIAGNOSTICS]);
+/** The two fixed diagnostics one reconcile artifact carries (#224); its other files are records. */
+export const RECONCILE_DIAGNOSTICS = Object.freeze(['account-reconcile.json', 'deployment-evidence.json']);
+/** One per-scope Service cleanup operation record a reconcile artifact carries (#224). */
+const RECONCILE_RECORD_FILE = /^service-cleanup-(0|[1-9][0-9]*)-[1-9][0-9]*-[1-9][0-9]*-[a-f0-9]{16}\.json$/;
 export const LIFECYCLE_ARCHIVE_MAX_BYTES = 8 * 1024 * 1024;
 export const LIFECYCLE_FILE_MAX_BYTES = 1024 * 1024;
 /** One page of the repository artifact list, and the safety bound on walking it. */
@@ -140,6 +153,8 @@ export const UNRESOLVED_REASONS = Object.freeze([
 const execute = promisify(execFile);
 const SKEW_MS = 5 * 60_000;
 const ARTIFACT_NAME = /^(beta-account-lifecycle|beta-smoke-account-lifecycle)-([1-9][0-9]*)-([1-9][0-9]*)$/;
+/** The reconcile family whose verified records answer the durable witness lookup (#224). */
+export const RECONCILE_ARTIFACT_NAME = /^beta-account-reconcile-([1-9][0-9]*)-([1-9][0-9]*)$/;
 const ISO_INSTANT = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,3})?(Z|[+-][0-9]{2}:[0-9]{2})$/;
 const WORKER_SCOPE = /^e2e-beta-([1-9][0-9]{0,19}-[1-9][0-9]{0,5}-[a-f0-9]{16})-[0-7]-[a-f0-9]{8}@anywear\.local$/;
 
@@ -202,6 +217,11 @@ export function maxArtifactsForWindow(window) {
   return lookbackDaysOfWindow(window) * RECONCILE_ARTIFACTS_PER_DAY;
 }
 
+/** The reconcile family's own bound for one window: nine artifacts per lookback day (#224). */
+export function maxReconcileArtifactsForWindow(window) {
+  return lookbackDaysOfWindow(window) * RECONCILE_RECORD_ARTIFACTS_PER_DAY;
+}
+
 /** The bound an identity must be resolved inside. */
 export function reconcileBound(from, hours = RECONCILE_RETENTION_HOURS) {
   requirePositiveInteger(hours, 'Reconcile retention');
@@ -220,6 +240,18 @@ export function parseManifestArtifactName(name) {
   return { smoke: match[1] === 'beta-smoke-account-lifecycle', runId: Number(match[2]), attempt: Number(match[3]) };
 }
 
+/**
+ * Parse one reconcile artifact name (#224). The family is produced by the same protected
+ * `workflow_dispatch` `main` run the lifecycle binding already checks, so it is bound by the same
+ * two functions; it is read only as a source of verified cleanup records.
+ */
+export function parseReconcileArtifactName(name) {
+  if (typeof name !== 'string') return undefined;
+  const match = RECONCILE_ARTIFACT_NAME.exec(name);
+  if (!match) return undefined;
+  return { smoke: false, runId: Number(match[1]), attempt: Number(match[2]) };
+}
+
 /** The E2E repository's immutable GitHub id, which the artifact and its run must name. */
 export const E2E_REPOSITORY_ID = 1317091305;
 
@@ -236,13 +268,16 @@ export function requireLifecycleArtifactDigest(value, label) {
 }
 
 /**
- * The repository's lifecycle artifacts inside the window, read from the whole artifact list.
+ * The repository's lifecycle and reconcile artifacts inside the window, read from the whole
+ * artifact list.
  *
  * The repository keeps every workflow's artifacts, and they are not this operation's budget:
  * the listing walks every page the API reports (`total_count`) and keeps only non-expired,
- * lifecycle-named rows created inside the window. Only those count against the nine-per-lookback-
- * day bound. A page failure, a malformed page, a short or empty page before the API's last page,
- * or an exhausted page walk fails closed: a truncated list would read as a quiet scan.
+ * lifecycle- or reconcile-named rows created inside the window. The two families are counted
+ * against their own per-lookback-day bounds: nine lifecycle artifacts (#217), and nine reconcile
+ * artifacts whose records may answer a durable witness lookup (#224). A page failure, a
+ * malformed page, a short or empty page before the API's last page, or an exhausted page walk
+ * fails closed: a truncated list would read as a quiet scan.
  *
  * `fetchPage(page, perPage)` returns one parsed page; the production transport is the GitHub API
  * and the tests inject a fake.
@@ -251,9 +286,11 @@ export async function collectLifecycleArtifacts({ window, fetchPage, pageSize = 
   if (typeof fetchPage !== 'function') throw new Error('Artifact listing requires its page transport');
   requirePositiveInteger(pageSize, 'Artifact page size');
   const bound = maxArtifactsForWindow(window);
+  const reconcileBound = maxReconcileArtifactsForWindow(window);
   const from = Date.parse(window.from);
   const to = Date.parse(window.to);
   const artifacts = [];
+  const reconcileArtifacts = [];
   for (let page = 1; ; page += 1) {
     if (page > MAX_ARTIFACT_PAGES) throw new Error('Artifact listing exceeds its page bound');
     const response = await fetchPage(page, pageSize);
@@ -268,21 +305,29 @@ export async function collectLifecycleArtifacts({ window, fetchPage, pageSize = 
     for (const artifact of response.artifacts) {
       // An expired artifact has no bytes left to read; it is outside the scan rather than
       // unbound, and the recorded residual is the leftover older than both retention windows.
-      if (artifact?.expired !== false || !parseManifestArtifactName(artifact?.name)) continue;
+      if (artifact?.expired !== false) continue;
+      const lifecycle = parseManifestArtifactName(artifact?.name);
+      const reconcile = lifecycle ? undefined : parseReconcileArtifactName(artifact?.name);
+      if (!lifecycle && !reconcile) continue;
       const createdAt = Date.parse(artifact.created_at ?? '');
       if (!Number.isFinite(createdAt) || createdAt < from || createdAt > to) continue;
-      artifacts.push({
+      const row = {
         id: requirePositiveInteger(artifact.id, 'Artifact id'),
         name: artifact.name,
         digest: requireLifecycleArtifactDigest(artifact.digest, `Lifecycle artifact ${artifact.name}`),
+        created_at: artifact.created_at,
         workflow_run: artifact.workflow_run,
-      });
+      };
+      // The two families are partitioned here, before anything is read, so each keeps its own
+      // bound: `sources.artifacts` counts the lifecycle family and never the reconcile one.
+      (lifecycle ? artifacts : reconcileArtifacts).push(row);
     }
     if (artifacts.length > bound) throw new Error('Lifecycle artifacts in the window exceed the reconcile bound');
+    if (reconcileArtifacts.length > reconcileBound) throw new Error('Reconcile artifacts in the window exceed the reconcile bound');
     if (page >= pages) break;
     if (response.artifacts.length < pageSize) throw new Error('Artifact listing is truncated');
   }
-  return artifacts;
+  return [...artifacts, ...reconcileArtifacts];
 }
 
 /**
@@ -319,6 +364,38 @@ export function classifyLifecycleArchive(entries) {
 }
 
 /**
+ * The closed upload set one reconcile artifact may contain (#224).
+ *
+ * `account-reconcile.json` is the record this family exists for, `deployment-evidence.json` is
+ * the live tuple the run read, and every `service-cleanup-<index>-<runScope>.json` is one
+ * per-scope Service cleanup operation record. Exactly those names are accepted; anything else,
+ * a directory, a symlink, a duplicate or an over-bound file refuses the artifact, the same way
+ * the lifecycle reader refuses an unknown file.
+ */
+export function classifyReconcileArchive(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) throw new Error('Reconcile artifact is empty');
+  const seen = new Set();
+  const records = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.name !== 'string') {
+      throw new Error('Reconcile artifact entry is malformed');
+    }
+    if (seen.has(entry.name)) throw new Error(`Reconcile artifact repeats ${entry.name}`);
+    seen.add(entry.name);
+    if (entry.directory === true || entry.symlink === true) throw new Error(`Reconcile artifact contains a directory or symlink: ${entry.name}`);
+    const record = RECONCILE_RECORD_FILE.test(entry.name);
+    if (!record && !RECONCILE_DIAGNOSTICS.includes(entry.name)) {
+      throw new Error(`Reconcile artifact contains an unknown file: ${entry.name}`);
+    }
+    if (!Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > LIFECYCLE_FILE_MAX_BYTES) {
+      throw new Error(`Reconcile artifact file is over its bound: ${entry.name}`);
+    }
+    if (record) records.push(entry.name);
+  }
+  return { records: records.sort() };
+}
+
+/**
  * The artifact list's own binding to the protected run.
  *
  * A lifecycle-named artifact is authoritative only when its name's run is the run the artifact
@@ -328,7 +405,7 @@ export function classifyLifecycleArchive(entries) {
  * binding is ignored and counted, never authoritative.
  */
 export function lifecycleArtifactBinding(artifact) {
-  const parsed = parseManifestArtifactName(artifact?.name);
+  const parsed = parseManifestArtifactName(artifact?.name) ?? parseReconcileArtifactName(artifact?.name);
   if (!parsed) return { bound: false, reason: 'name' };
   const run = artifact.workflow_run;
   if (!run || typeof run !== 'object' || Array.isArray(run)) return { bound: false, reason: 'run' };
@@ -1065,6 +1142,136 @@ export function cleanupEvidencePath(directory, index, runScope) {
 }
 
 /**
+ * A verified live-root record: the only population a durable cleanup proof may be read from
+ * (#224).
+ *
+ * A v3 record can only have come from the live tier, so it is live by construction; a v4 record
+ * must say so. A marker record carries no task entries and an artifact record stamps them
+ * `artifact`, so neither can be a source: every accepted proof traces one hop back to a run that
+ * read ECS.
+ */
+function isVerifiedLiveRoot(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
+  if (record.record_type !== 'anywear_e2e_service_cleanup_operation') return false;
+  if (record.schema_version !== 3 && record.schema_version !== 4) return false;
+  const operation = record.operation;
+  if (!operation || typeof operation !== 'object' || Array.isArray(operation)) return false;
+  if (operation.proof_status !== 'verified' || operation.status !== 'SUCCEEDED') return false;
+  if (typeof operation.execution_name !== 'string' || operation.execution_name.length === 0) return false;
+  if (record.schema_version === 4 && operation.proof_origin !== 'live') return false;
+  if (operation.artifact_source !== undefined) return false;
+  if (!Array.isArray(operation.tasks) || operation.tasks.length !== 2) return false;
+  return operation.tasks.every(task => task && typeof task === 'object' && !Array.isArray(task) && task.proof_origin === 'live');
+}
+
+/** The provenance the written record restates for one artifact entry. */
+function witnessSourceFor(artifact, entry) {
+  return { artifact_id: artifact.id, artifact_name: artifact.name, artifact_digest: artifact.digest,
+    file: entry.name, record_sha256: byteHash(entry.bytes) };
+}
+
+/**
+ * The index of verified live-root records a run has read (#224).
+ *
+ * One record per execution name: an identical duplicate keeps the earlier artifact (a record
+ * cannot be improved by being uploaded twice), while two records for one name that differ drop
+ * the name entirely and are counted in the run log, so the verifier refuses that identity
+ * instead of letting a coin flip decide between them.
+ */
+export function createCleanupWitnessIndex({ log = () => {} } = {}) {
+  const entries = new Map();
+  const dropped = new Set();
+  const add = (bytes, source, createdAt = 0) => {
+    let record;
+    try { record = parseStrictJson(bytes); }
+    catch (error) { throw new Error(`Cleanup record ${source.file} is not strict JSON`, { cause: error }); }
+    if (!isVerifiedLiveRoot(record)) return false;
+    const name = record.operation.execution_name;
+    if (dropped.has(name)) return false;
+    const existing = entries.get(name);
+    if (!existing) { entries.set(name, { record, source, createdAt }); return true; }
+    if (isDeepStrictEqual(existing.record, record)) {
+      if (createdAt < existing.createdAt) entries.set(name, { record, source, createdAt });
+      return true;
+    }
+    entries.delete(name);
+    dropped.add(name);
+    log(`cleanup record for ${name} appears in two artifacts with different bytes; refusing it rather than choosing`);
+    return false;
+  };
+  return {
+    add,
+    lookup: name => (dropped.has(name) ? undefined : entries.get(name)),
+    isDropped: name => dropped.has(name),
+  };
+}
+
+/**
+ * The lazy durable-witness lookup the reconcile supplies to the cleanup verifier (#224).
+ *
+ * The listing it filters is the single artifact-list walk the run already performed, so nothing
+ * extra is listed. Nothing is read until the verifier asks: an execution whose live ECS tasks or
+ * completion marker still prove it costs zero artifact reads. When asked, only the reconcile
+ * family is considered, only rows with a published digest created at or after the execution's
+ * own `stopped_at` are candidates, and at most `maxReads` candidates are read, nearest the stop
+ * time first. The first record for the exact execution name answers; anything else is a miss,
+ * and a miss is a refusal at `task_proof`, never a pass.
+ */
+export function createCleanupWitnessLookup({ artifacts = [], io, index, log = () => {}, runs = new Map(),
+  maxReads = RECONCILE_WITNESS_ARTIFACT_READS } = {}) {
+  if (!io || typeof io.readArtifact !== 'function' || typeof io.getWorkflowRun !== 'function') {
+    throw new Error('Cleanup witness lookup requires the artifact and workflow-run transports');
+  }
+  if (!index || typeof index.lookup !== 'function' || typeof index.add !== 'function' || typeof index.isDropped !== 'function') {
+    throw new Error('Cleanup witness lookup requires its record index');
+  }
+  const read = new Set();
+  const announce = (name, found) => log(`cleanup record for ${name} read from ${found.source.artifact_name} (${found.source.file})`);
+  return async function recovery(executionName, stoppedAt) {
+    const known = index.lookup(executionName);
+    if (known) {
+      announce(executionName, known);
+      return known;
+    }
+    if (index.isDropped(executionName)) return undefined;
+    const stop = Date.parse(stoppedAt ?? '');
+    if (!Number.isFinite(stop)) return undefined;
+    const candidates = artifacts.filter(artifact => artifact?.expired === false
+      && ARTIFACT_DIGEST.test(artifact?.digest ?? '')
+      && Number.isFinite(Date.parse(artifact?.created_at ?? ''))
+      && Date.parse(artifact.created_at) >= stop)
+      .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at) || left.id - right.id);
+    let reads = 0;
+    for (const artifact of candidates) {
+      if (index.lookup(executionName) || index.isDropped(executionName)) break;
+      if (read.has(artifact.id)) continue;
+      if (reads >= maxReads) break;
+      // The same protected-run binding the lifecycle family uses; an artifact it cannot bind is
+      // never a witness, and a run lookup the transport cannot answer leaves it unbound.
+      const binding = lifecycleArtifactBinding(artifact);
+      if (!binding.bound) continue;
+      if (!runs.has(binding.parsed.runId)) runs.set(binding.parsed.runId, await io.getWorkflowRun(binding.parsed.runId));
+      if (!lifecycleWorkflowRunBinding(runs.get(binding.parsed.runId), binding.headSha).bound) continue;
+      reads += 1;
+      read.add(artifact.id);
+      const entries = await io.readArtifact(artifact);
+      const { records } = classifyReconcileArchive(entries);
+      for (const file of records) {
+        const entry = entries.find(candidate => candidate.name === file);
+        if (!entry || entry.bytes === undefined) continue;
+        index.add(entry.bytes, witnessSourceFor(artifact, entry), Date.parse(artifact.created_at));
+      }
+    }
+    const found = index.lookup(executionName);
+    if (found) {
+      announce(executionName, found);
+      return found;
+    }
+    return undefined;
+  };
+}
+
+/**
  * The run annotations the record earns (#217).
  *
  * A reported condition — a foreign caller, a pool-address record with no proof, a record
@@ -1141,8 +1348,10 @@ function requireDeadline(value, label) {
  *                                     the address that identity was created with
  *   getUser(email)                 -> { Username, UserAttributes } or UserNotFoundException
  *   deleteUser(username)           -> deletes by immutable username
- *   runServiceCleanup(inputs, env, { deadline, migrationGeneration? })
+ *   runServiceCleanup(inputs, env, { deadline, migrationGeneration?, recovery? })
  *                                  -> { proof_status, committed_result } or undefined
+ *                                     `recovery` is the lazy durable-witness lookup this run
+ *                                     supplies; nothing else supplies one (#224)
  */
 export async function reconcileAccounts({
   io,
@@ -1172,12 +1381,22 @@ export async function reconcileAccounts({
   // refuses before any deletion.
   if (!Array.isArray(listed)) throw new Error('Lifecycle artifact list is unavailable');
   const artifactBound = maxArtifactsForWindow(window);
+  const reconcileBound = maxReconcileArtifactsForWindow(window);
+  // Partition the single listing by name family before anything is read (#224), so
+  // `sources.artifacts` keeps counting exactly the lifecycle family it has always counted.
+  const listedLifecycle = [];
+  const listedReconcile = [];
   for (const artifact of listed) {
-    if (!parseManifestArtifactName(artifact?.name)) throw new Error('Reconcile was offered a non-lifecycle artifact');
+    if (parseManifestArtifactName(artifact?.name)) listedLifecycle.push(artifact);
+    else if (parseReconcileArtifactName(artifact?.name)) listedReconcile.push(artifact);
+    else throw new Error('Reconcile was offered a non-lifecycle artifact');
   }
-  if (listed.length > artifactBound) {
+  if (listedLifecycle.length > artifactBound) {
     // Fail closed rather than truncate: a truncated list would read as a quiet scan.
     throw new Error('Lifecycle artifacts in the window exceed the reconcile bound');
+  }
+  if (listedReconcile.length > reconcileBound) {
+    throw new Error('Reconcile artifacts in the window exceed the reconcile bound');
   }
 
   // Bind every lifecycle-named artifact to the protected run. An unbound one — including one
@@ -1187,7 +1406,7 @@ export async function reconcileAccounts({
   const artifacts = [];
   let artifactsIgnored = 0;
   const runs = new Map();
-  for (const artifact of listed) {
+  for (const artifact of listedLifecycle) {
     const binding = lifecycleArtifactBinding(artifact);
     if (!binding.bound) {
       artifactsIgnored += 1;
@@ -1205,6 +1424,12 @@ export async function reconcileAccounts({
     artifacts.push({ artifact, parsed: binding.parsed });
   }
 
+  // The durable witness index (#224). Lifecycle artifacts are read for their manifests anyway, so
+  // their `service-cleanup-operation.json` diagnostic is indexed here at no extra read; the
+  // reconcile family is read only by the lazy lookup, when a cleanup's live proof is exhausted.
+  const witnessIndex = createCleanupWitnessIndex({
+    log: (line) => log(`Reconcile ${reconcileId}: ${line}`),
+  });
   const manifests = [];
   for (const { artifact, parsed } of artifacts) {
     const entries = await io.readArtifact(artifact);
@@ -1213,7 +1438,21 @@ export async function reconcileAccounts({
       const entry = entries.find((candidate) => candidate.name === name);
       manifests.push(readManifest(entry.bytes, parsed));
     }
+    const diagnostic = entries.find((candidate) => candidate.name === 'service-cleanup-operation.json');
+    if (diagnostic?.bytes !== undefined) {
+      // The diagnostic was ignored before #224, so a corrupt one may not turn an otherwise valid
+      // reconcile into a source failure: it simply contributes no witness.
+      try { witnessIndex.add(diagnostic.bytes, witnessSourceFor(artifact, diagnostic)); }
+      catch { log(`Reconcile ${reconcileId}: ignored an unreadable cleanup diagnostic in ${artifact.name}`); }
+    }
   }
+  const witnessLookup = createCleanupWitnessLookup({
+    artifacts: listedReconcile,
+    io,
+    index: witnessIndex,
+    runs,
+    log: (line) => log(`Reconcile ${reconcileId}: ${line}`),
+  });
 
   const events = await io.lookupCreateUserEvents(window);
   // The live event masks the created address (#217), so a masked creation's `sub` is resolved
@@ -1229,7 +1468,7 @@ export async function reconcileAccounts({
       + `the identity set is built from ${events.length} CloudTrail event(s) alone.`);
   }
   log(`Reconcile ${reconcileId}: ${artifacts.length} run-bound artifact(s), ${artifactsIgnored} ignored, `
-    + `${manifests.length} manifest(s), ${events.length} CloudTrail event(s), `
+    + `${manifests.length} manifest(s), ${listedReconcile.length} reconcile artifact(s), ${events.length} CloudTrail event(s), `
     + `${identitySet.identities.length} attributable identit(ies), ${identitySet.unresolved.length} reportable condition(s), `
     + `${creationWarnings.length} unattributed creation warning(s).`);
 
@@ -1265,7 +1504,8 @@ export async function reconcileAccounts({
       }
       continue;
     }
-    await reconcileGroup({ group, index, io, environment, recordIdentities, unresolved, deadline, migrationGeneration });
+    await reconcileGroup({ group, index, io, environment, recordIdentities, unresolved, deadline, migrationGeneration,
+      recovery: witnessLookup });
   }
 
   const result = judgeResult(unresolved, now, bounds);
@@ -1282,7 +1522,7 @@ export async function reconcileAccounts({
   return { record, result, identitySet, warnings: creationWarnings };
 }
 
-async function reconcileGroup({ group, index, io, environment, recordIdentities, unresolved, deadline, migrationGeneration }) {
+async function reconcileGroup({ group, index, io, environment, recordIdentities, unresolved, deadline, migrationGeneration, recovery }) {
   const members = [];
   for (const identity of group.identities) {
     let live;
@@ -1349,7 +1589,7 @@ async function reconcileGroup({ group, index, io, environment, recordIdentities,
     evidence = await io.runServiceCleanup(inputs, {
       ...environment,
       E2E_SERVICE_CLEANUP_EVIDENCE_PATH: cleanupEvidencePath(environment.E2E_ACCOUNT_RECONCILE_DIRECTORY ?? 'reconcile', index, group.runScope),
-    }, { deadline, ...(migrationGeneration ? { migrationGeneration: true } : {}) });
+    }, { deadline, ...(migrationGeneration ? { migrationGeneration: true } : {}), recovery });
   } catch (error) {
     // The cleanup wait is bounded by the absolute in-job deadline, so a Service wait cannot
     // outlive the job and lose the record. A deadline stop is the design's own condition.
@@ -1443,29 +1683,38 @@ function isUserNotFound(error) {
   return error instanceof Error && (error.name === 'UserNotFoundException' || /UserNotFoundException/.test(error.message));
 }
 
-// One lifecycle artifact's closed upload set, listed and extracted in one pass so the reader
-// can reject an unknown name, a directory, a symlink or a repeated file before it reads
-// anything. A v4 artifact upload flattens `test-results/account-budget.json` to
-// `account-budget.json`; both account legs and the two cleanup diagnostics keep their names.
-const LIFECYCLE_ARCHIVE_READER = [
-  'import sys, json, zipfile, base64',
-  'closed=["account-budget.json","account-budget-oldest-client.json","service-cleanup-operation.json","service-cleanup-run.json"]',
-  'with zipfile.ZipFile(sys.argv[1]) as z:',
-  ' entries=z.infolist()',
-  ' names=[e.filename for e in entries]',
-  ' if len(names)!=len(set(names)): raise ValueError("Lifecycle artifact repeats a file")',
-  ' listed=[]',
-  ' files={}',
-  ' for e in entries:',
-  '  symlink=((e.external_attr>>16)&0o170000)==0o120000',
-  '  listed.append({"name":e.filename,"size":e.file_size,"directory":e.is_dir(),"symlink":symlink})',
-  '  if e.filename in closed and not e.is_dir() and not symlink and e.file_size<=1048576:',
-  '   files[e.filename]=base64.b64encode(z.read(e.filename)).decode("ascii")',
-  ' print(json.dumps({"entries":listed,"files":files}))',
-].join('\n');
+// One artifact's closed upload set, listed and extracted in one pass so the reader can reject an
+// unknown name, a directory, a symlink or a repeated file before it reads anything. A v4 artifact
+// upload flattens `test-results/account-budget.json` to `account-budget.json`; both account legs
+// and the two cleanup diagnostics keep their names. The closed set is a parameter (#224): the
+// reconcile family extracts its two diagnostics and every `service-cleanup-<index>-<scope>.json`
+// record, which are named only by their pattern.
+function archiveReader(closed, pattern = '') {
+  return [
+    'import sys, json, zipfile, base64, re',
+    `closed=${JSON.stringify(closed)}`,
+    `pattern=re.compile(${JSON.stringify(pattern)}) if ${JSON.stringify(pattern)} else None`,
+    'with zipfile.ZipFile(sys.argv[1]) as z:',
+    ' entries=z.infolist()',
+    ' names=[e.filename for e in entries]',
+    ' if len(names)!=len(set(names)): raise ValueError("Artifact repeats a file")',
+    ' listed=[]',
+    ' files={}',
+    ' for e in entries:',
+    '  symlink=((e.external_attr>>16)&0o170000)==0o120000',
+    '  listed.append({"name":e.filename,"size":e.file_size,"directory":e.is_dir(),"symlink":symlink})',
+    '  if (e.filename in closed or (pattern and pattern.match(e.filename))) and not e.is_dir() and not symlink and e.file_size<=1048576:',
+    '   files[e.filename]=base64.b64encode(z.read(e.filename)).decode("ascii")',
+    ' print(json.dumps({"entries":listed,"files":files}))',
+  ].join('\n');
+}
 
-function extractLifecycleArchive(archivePath) {
-  const stdout = execFileSync('python3', ['-c', LIFECYCLE_ARCHIVE_READER, archivePath], {
+const LIFECYCLE_ARCHIVE_READER = archiveReader(LIFECYCLE_UPLOAD_SET);
+const RECONCILE_RECORD_FILE_PATTERN = '^service-cleanup-(?:0|[1-9][0-9]*)-(?:[1-9][0-9]*)-(?:[1-9][0-9]*)-[a-f0-9]{16}\\.json$';
+const RECONCILE_ARCHIVE_READER = archiveReader(RECONCILE_DIAGNOSTICS, RECONCILE_RECORD_FILE_PATTERN);
+
+function extractLifecycleArchive(archivePath, reader = LIFECYCLE_ARCHIVE_READER) {
+  const stdout = execFileSync('python3', ['-c', reader, archivePath], {
     timeout: 15_000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8',
   });
   const parsed = parseStrictJson(stdout);
@@ -1515,7 +1764,9 @@ export function createReconcileIo(environment = process.env, { cleanupIo } = {})
     try {
       const path = join(directory, 'artifact.zip');
       await writeFile(path, archive);
-      return extractLifecycleArchive(path);
+      // The reconcile family's records are named only by their pattern, so its reader gets the
+      // closed set that admits them (#224).
+      return extractLifecycleArchive(path, parseReconcileArtifactName(artifact?.name) ? RECONCILE_ARCHIVE_READER : LIFECYCLE_ARCHIVE_READER);
     } finally {
       // The extracted copy is a scratch detail; nothing read from it is kept on disk.
       await rm(directory, { recursive: true, force: true });
@@ -1567,16 +1818,18 @@ export function createReconcileIo(environment = process.env, { cleanupIo } = {})
       assertE2EExecution(environment);
       await client.send(new AdminDeleteUserCommand({ UserPoolId: userPoolId, Username: username }));
     },
-    async runServiceCleanup(inputs, cleanupEnvironment, { deadline, migrationGeneration } = {}) {
+    async runServiceCleanup(inputs, cleanupEnvironment, { deadline, migrationGeneration, recovery } = {}) {
       // The absolute in-job deadline bounds the Service wait, so a 30-minute capability wait
       // cannot outlive the 15-minute job and lose the record it was about to write.
       if (typeof deadline !== 'number' || !Number.isFinite(deadline) || deadline <= 0) {
         throw new Error('Service cleanup requires the caller\'s absolute deadline');
       }
       // The migration allowance reaches the cleanup only when the recorded window is the
-      // 90-day retention; every other dispatch leaves the key absent (#217).
+      // 90-day retention; every other dispatch leaves the key absent (#217). The durable
+      // witness lookup is the reconcile's own source (#224); every other caller passes none.
       const evidence = await runCleanupOperation(inputs, cleanupEnvironment, cleanupIo,
-        { deadline, ...(migrationGeneration === true ? { migrationGeneration: true } : {}) });
+        { deadline, ...(migrationGeneration === true ? { migrationGeneration: true } : {}),
+          ...(typeof recovery === 'function' ? { recovery } : {}) });
       if (!evidence) return undefined;
       const operation = evidence.operation ?? {};
       return { proof_status: operation.proof_status, committed_result: operation.committed_result };
