@@ -49,11 +49,125 @@ function committed(patch = {}, input = envelope) {
     dlq: { deleted: 0, preserved: 0 }, ...patch };
 }
 
+/** One artifact witness source, in the shape the reconcile supplies and the record restates. */
+function witnessSource(patch = {}) {
+  return { artifact_id: 12527925184, artifact_name: 'beta-account-reconcile-40012312740-1',
+    artifact_digest: `sha256:${'d'.repeat(64)}`, file: 'service-cleanup-1-38851867995-1-0000000000000000.json',
+    record_sha256: 'e'.repeat(64), ...patch };
+}
+
+/** The two live-root task entries a verified record carries for one envelope. */
+function liveTaskEntries(input = envelope) {
+  return ['verification', 'cleanup'].map(kind => ({
+    task_arn: task(kind), task_definition_arn: definition(kind), kind, status: 'STOPPED', exit_code: 0,
+    image_digest: input.service_image_digest, service_commit_sha: input.service_commit_sha,
+    log_group: '/anywear/beta/one-shot', log_stream: `${prefix(kind)}/OneShot/${task(kind).split('/').at(-1)}`,
+    proof_origin: 'live', snapshot_sha256: 'f'.repeat(64),
+    ...(kind === 'cleanup' ? { envelope_sha256: hash(JSON.stringify(input)) } : {}),
+  }));
+}
+
+/** One complete v4 verified live-root operation record, bound to the fixture's execution instance. */
+function operationRecord({ input = envelope, proofOrigin = 'live', tasks = liveTaskEntries(input), committedResult = committed({}, input),
+  executionName = deterministicCleanupExecutionName(input, 0), startedAt = '2026-10-10T00:00:00.000Z',
+  stoppedAt = '2026-10-10T00:00:01.000Z', patch = {} } = {}) {
+  return { schema_version: 4, record_type: 'anywear_e2e_service_cleanup_operation', operation: {
+    operation_mode: 'normal', state_machine_version_arn: environment.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN,
+    execution_arn: cleanupExecutionArn(environment.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN, executionName),
+    execution_name: executionName, started_at: startedAt, stopped_at: stoppedAt, status: 'SUCCEEDED',
+    proof_status: 'verified', proof_origin: proofOrigin, input_sha256: hash(JSON.stringify(input)), input,
+    output: output(input), tasks, committed_result: committedResult, ...patch } };
+}
+
+// The recorded #217 execution and the operation record a previous run verified into artifact
+// `beta-account-reconcile-40012312740-1` (expires 2027-01-21). It is schema 3, so it is accepted
+// only through the legacy reader, and it names the state-machine version `:9` from a deleted
+// stack lifetime while its execution ARN stays the unqualified one this dispatch re-derives.
+const RECORDED_CLEANUP_REQUEST = '{"runScope":"38851867995-1-0000000000000000","users":[{"sub":"d4021cae-30e1-7050-32a1-d44b23a32f56","email":"e2e-beta-38851867995-1-0000000000000000-1-f94e6900@anywear.local"}]}';
+const RECORDED_SOURCE = '320ba6a4b3533773f05665291107995dc0ea20e9';
+const RECORDED_IMAGE = 'sha256:02828a7611faa82a108c37f436dbcc73f8c6fa5149255fc8d1d14d8f43866510';
+const RECORDED_INPUT_SHA256 = '9ffea293028445e5d287bcab0691751bfc240f33b750f1ca105da16736d0bd7c';
+const RECORDED_NAME = 'beta-cleanup-38851867995-1-0000000000000000-8e12aa9ab79b504a';
+const recordedInputs = { ...inputs, cleanup_json: RECORDED_CLEANUP_REQUEST };
+const recordedEnvironment = { ...environment, E2E_CLEANUP_SERVICE_SHA: RECORDED_SOURCE, E2E_CLEANUP_SERVICE_IMAGE_DIGEST: RECORDED_IMAGE };
+const recordedEnvelope = createCleanupOperationEnvelope(recordedInputs, recordedEnvironment);
+const recordedRecord = {
+  schema_version: 3,
+  record_type: 'anywear_e2e_service_cleanup_operation',
+  operation: {
+    operation_mode: 'normal',
+    state_machine_version_arn: 'arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:9',
+    execution_arn: `arn:aws:states:ap-east-1:650880818323:execution:beta-anywear-tester-cleanup:${RECORDED_NAME}`,
+    execution_name: RECORDED_NAME,
+    status: 'SUCCEEDED',
+    proof_status: 'verified',
+    input_sha256: RECORDED_INPUT_SHA256,
+    input: {
+      schema_version: 1,
+      operation_mode: 'normal',
+      operation_id: 'beta-tester-cleanup:38851867995-1-0000000000000000',
+      run_scope: '38851867995-1-0000000000000000',
+      request_sha256: '8e12aa9ab79b504a211e72763fa6ad15b32619148488196b03e398b1c0317589',
+      service_commit_sha: RECORDED_SOURCE,
+      service_image_digest: RECORDED_IMAGE,
+      cleanup_request: RECORDED_CLEANUP_REQUEST,
+    },
+    started_at: '2026-10-23T19:39:42.419Z',
+    stopped_at: '2026-10-23T19:41:46.829Z',
+    output: {
+      schema_version: 1,
+      record_type: 'anywear_beta_cleanup_tasks',
+      service_commit_sha: RECORDED_SOURCE,
+      service_image_digest: RECORDED_IMAGE,
+      cluster_arn: 'arn:aws:ecs:ap-east-1:650880818323:cluster/beta-anywear',
+      log_group_name: '/anywear/beta/one-shot',
+      verification_log_stream_prefix: 'beta-anywear-cleanup-verify',
+      cleanup_log_stream_prefix: 'beta-anywear-cleanup',
+      run_scope: '38851867995-1-0000000000000000',
+      verification_exit_code: 0,
+      verification_task_definition_arn: 'arn:aws:ecs:ap-east-1:650880818323:task-definition/beta-anywear-cleanup-verify:38',
+      verification_task_arn: 'arn:aws:ecs:ap-east-1:650880818323:task/beta-anywear/baed47d109214ef799eee0b38a64109e',
+      verification_task_status: 'STOPPED',
+      cleanup_task_definition_arn: 'arn:aws:ecs:ap-east-1:650880818323:task-definition/beta-anywear-cleanup:40',
+      operation_id: 'beta-tester-cleanup:38851867995-1-0000000000000000',
+      cleanup_task_status: 'STOPPED',
+      cleanup_exit_code: 0,
+      cleanup_task_arn: 'arn:aws:ecs:ap-east-1:650880818323:task/beta-anywear/c98f9eff853d406a8097d3c1c7436fec',
+      request_sha256: '8e12aa9ab79b504a211e72763fa6ad15b32619148488196b03e398b1c0317589',
+    },
+    tasks: [
+      { task_arn: 'arn:aws:ecs:ap-east-1:650880818323:task/beta-anywear/baed47d109214ef799eee0b38a64109e',
+        task_definition_arn: 'arn:aws:ecs:ap-east-1:650880818323:task-definition/beta-anywear-cleanup-verify:38',
+        kind: 'verification', status: 'STOPPED', exit_code: 0, image_digest: RECORDED_IMAGE, service_commit_sha: RECORDED_SOURCE,
+        log_group: '/anywear/beta/one-shot', log_stream: 'beta-anywear-cleanup-verify/OneShot/baed47d109214ef799eee0b38a64109e',
+        proof_origin: 'live', snapshot_sha256: 'bb9104e074da029b476591e8f5b6d5f21db0d2cc8d7523e99e760d7c3764b93e' },
+      { task_arn: 'arn:aws:ecs:ap-east-1:650880818323:task/beta-anywear/c98f9eff853d406a8097d3c1c7436fec',
+        task_definition_arn: 'arn:aws:ecs:ap-east-1:650880818323:task-definition/beta-anywear-cleanup:40',
+        kind: 'cleanup', status: 'STOPPED', exit_code: 0, image_digest: RECORDED_IMAGE, service_commit_sha: RECORDED_SOURCE,
+        log_group: '/anywear/beta/one-shot', log_stream: 'beta-anywear-cleanup/OneShot/c98f9eff853d406a8097d3c1c7436fec',
+        proof_origin: 'live', snapshot_sha256: '266d6f576ef8a2c763aa5e80ae8249b24e071230481aa97edabd21e0be6edecf',
+        envelope_sha256: RECORDED_INPUT_SHA256 },
+    ],
+    committed_result: {
+      schema_version: 1, source: 'beta-tester-cleanup', cleanup: 'beta-testers',
+      operation_id: 'beta-tester-cleanup:38851867995-1-0000000000000000',
+      request_sha256: '8e12aa9ab79b504a211e72763fa6ad15b32619148488196b03e398b1c0317589',
+      operation_mode: 'normal', run_scope: '38851867995-1-0000000000000000', transaction_committed: true,
+      users: 0, missingUsers: 1, tasks: 0, outbox: 0, idempotency: 0, generations: 0, relations: 0, outfits: 0, items: 0,
+      photos: 0, objects: 0, objectsMissing: 0, dlq: { deleted: 0, preserved: 0 },
+      record_type: 'anywear_beta_cleanup_result', service_commit_sha: RECORDED_SOURCE, service_image_digest: RECORDED_IMAGE,
+      envelope_sha256: RECORDED_INPUT_SHA256,
+    },
+  },
+};
+
 /**
  * A stateful two-generation mock. Generation 0 is absent unless seeded, and a
  * start inserts the generation it names; describe reports the current status of
  * that exact execution under the envelope and version it was seeded with.
- * Nothing here models execution history: the new rule never reads it.
+ * Nothing here models Step Functions execution history: the verifier reads the
+ * cleanup marker and, once ECS has forgotten a stopped task, the caller's
+ * artifact witness — it never reads execution history.
  */
 function fixture(options = {}) {
   const calls = [];
@@ -100,9 +214,12 @@ function fixture(options = {}) {
       if (args[0] === 'stepfunctions') throw new Error('The single rule never reads execution history');
       if (args[1] === 'list-tasks') return options.inventory?.(args, calls) ?? { taskArns: [] };
       if (args[1] === 'describe-tasks') {
-        const kind = args.at(-1) === task('verification') ? 'verification' : 'cleanup';
-        if (options.missing?.includes(kind)) return { failures: [{ arn: task(kind), reason: 'MISSING' }], tasks: [] };
-        if (options.missingMalformed?.includes(kind)) return { failures: [{ arn: task(kind), reason: 'MISSING', detail: 'unexpected' }], tasks: [] };
+        // The requested ARN is echoed back, so a recorded execution's real task identities can be
+        // answered as MISSING exactly as ECS answers them once the stopped task has aged out.
+        const requested = args.at(-1);
+        const kind = requested === task('verification') ? 'verification' : 'cleanup';
+        if (options.missing?.includes(kind)) return { failures: [{ arn: requested, reason: 'MISSING' }], tasks: [] };
+        if (options.missingMalformed?.includes(kind)) return { failures: [{ arn: requested, reason: 'MISSING', detail: 'unexpected' }], tasks: [] };
         const value = { taskArn: task(kind), clusterArn: cluster, taskDefinitionArn: definition(kind), lastStatus: 'STOPPED',
           desiredStatus: 'STOPPED', startedBy: 'AWS Step Functions',
           containers: [{ name: 'OneShot', lastStatus: 'STOPPED', exitCode: 0, imageDigest: proofEnvelope.service_image_digest }],
@@ -133,10 +250,11 @@ async function run(options = {}, environmentPatch = {}, before, operationOptions
   const directory = await mkdtemp(join(tmpdir(), 'anywear-cleanup-proof-'));
   const evidencePath = join(directory, 'operation.json');
   const effective = { ...environment, ...environmentPatch };
+  const cleanupInputs = options.inputs ?? inputs;
   const io = fixture({ currentVersionArn: effective.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN, ...options });
   try {
     const extra = await before?.(directory);
-    const execution = () => runCleanupOperation(inputs, { ...effective, E2E_SERVICE_CLEANUP_EVIDENCE_PATH: evidencePath, ...extra }, io, operationOptions);
+    const execution = () => runCleanupOperation(cleanupInputs, { ...effective, E2E_SERVICE_CLEANUP_EVIDENCE_PATH: evidencePath, ...extra }, io, operationOptions);
     return await options.verify(execution, io, evidencePath);
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
@@ -244,11 +362,180 @@ test('normal cleanup persists pending evidence and requires actual tasks and a u
     };
     const result = await execute();
     assert.equal(result.operation.proof_status, 'verified');
+    assert.equal(result.operation.proof_origin, 'live');
     assert.equal(result.operation.committed_result.transaction_committed, true);
     assert.equal(result.operation.tasks.length, 2);
     assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), result);
     assert.equal(io.calls.filter(call => call.aws?.[0] === 'ecs' && call.aws[1] !== 'list-tasks').length, 4);
   } });
+});
+
+test('a SUCCEEDED execution whose two ECS tasks are MISSING verifies from the completion marker', async () => {
+  // (A) The first mandated regression: the observed #217 shape — both stopped tasks aged out while
+  // the Service's own completion bytes survive — is a marker-tier verification, not a refusal.
+  await run({ existing: { 0: 'SUCCEEDED' }, missing: ['verification', 'cleanup'], verify: async (execute, io) => {
+    const result = await execute();
+    assert.equal(result.operation.proof_status, 'verified');
+    assert.equal(result.operation.proof_origin, 'marker');
+    assert.equal(result.operation.committed_result.transaction_committed, true);
+    assert.equal(Object.hasOwn(result.operation, 'tasks'), false, 'a marker proof never presents half a task pair');
+    assert.equal(Object.hasOwn(result.operation, 'artifact_source'), false);
+    // Two describe-tasks reads answer MISSING; no definition is read and no marker wait is retried.
+    assert.equal(io.calls.filter(call => call.aws?.[1] === 'describe-tasks').length, 2);
+    assert.equal(io.calls.filter(call => call.aws?.[1] === 'describe-task-definition').length, 0);
+    assert.equal(io.calls.filter(call => call.aws?.[0] === 'logs').length, 2);
+    assert.equal(io.calls.some(call => call.aws?.[0] === 'stepfunctions'), false);
+  } });
+});
+
+test('an aged-out execution with no marker refuses at task_proof and keeps the identity unresolved', async () => {
+  // (B) The second mandated regression: when no durable proof survives, the operator sees exactly
+  // today's refusal — the same phase, category and failure sentence — and no committed result.
+  await run({ existing: { 0: 'SUCCEEDED' }, missing: ['verification', 'cleanup'],
+    logs: () => ({ events: [], nextForwardToken: 'end' }), verify: async (execute, _io, path) => {
+      await assert.rejects(execute(), /identities retained/);
+      const operation = JSON.parse(await readFile(path, 'utf8')).operation;
+      assert.equal(operation.proof_status, 'refused');
+      assert.equal(operation.refusal_phase, 'task_proof');
+      assert.equal(operation.refusal_category, 'task_proof_unavailable');
+      assert.equal(operation.failure, 'Exact execution/task/committed-result proof unavailable; Cognito identities retained');
+      assert.equal(Object.hasOwn(operation, 'committed_result'), false);
+      assert.equal(Object.hasOwn(operation, 'tasks'), false);
+    } });
+});
+
+test('one MISSING leg with a surviving marker verifies as marker and never consults the artifact lookup', async () => {
+  // (C) The boundary is asymmetric: one clean absence opens the marker tier, and the observed leg
+  // is still validated in full. Nothing calls the witness lookup.
+  let recoveryCalls = 0;
+  const recovery = () => { recoveryCalls += 1; return { record: operationRecord(), source: witnessSource() }; };
+  await run({ existing: { 0: 'SUCCEEDED' }, missing: ['verification'], verify: async (execute, io) => {
+    const result = await execute();
+    assert.equal(result.operation.proof_status, 'verified');
+    assert.equal(result.operation.proof_origin, 'marker');
+    assert.equal(Object.hasOwn(result.operation, 'tasks'), false);
+    assert.equal(io.calls.filter(call => call.aws?.[1] === 'describe-task-definition').length, 1);
+    assert.equal(recoveryCalls, 0, 'the marker tier does not consult an archived record');
+  } }, {}, undefined, { recovery });
+});
+
+test('one MISSING leg with no marker refuses rather than accepting a record for the observable task', async () => {
+  // (D) An archived record never stands in for a task ECS can still show.
+  let recoveryCalls = 0;
+  const recovery = () => { recoveryCalls += 1; return { record: operationRecord(), source: witnessSource() }; };
+  await run({ existing: { 0: 'SUCCEEDED' }, missing: ['verification'],
+    logs: () => ({ events: [], nextForwardToken: 'end' }), verify: async (execute, _io, path) => {
+      await assert.rejects(execute(), /identities retained/);
+      const operation = JSON.parse(await readFile(path, 'utf8')).operation;
+      assert.equal(operation.refusal_phase, 'task_proof');
+      assert.equal(operation.refusal_category, 'task_proof_unavailable');
+      assert.equal(recoveryCalls, 0, 'the artifact tier is closed while a task is observable');
+    } }, {}, undefined, { recovery });
+});
+
+test('both MISSING with no marker verifies from a verified operation record as an artifact proof', async () => {
+  // (E) The artifact tier: every binding re-proved, the record's source restated, and both task
+  // entries stamped `artifact` so a copy is never laundered as a live read.
+  const witness = { record: operationRecord(), source: witnessSource() };
+  await run({ existing: { 0: 'SUCCEEDED' }, missing: ['verification', 'cleanup'],
+    logs: () => ({ events: [], nextForwardToken: 'end' }), verify: async (execute, io, path) => {
+      const result = await execute();
+      assert.equal(result.operation.proof_status, 'verified');
+      assert.equal(result.operation.proof_origin, 'artifact');
+      assert.deepEqual(result.operation.artifact_source, witnessSource());
+      assert.deepEqual(result.operation.tasks.map(entry => entry.proof_origin), ['artifact', 'artifact']);
+      assert.equal(result.operation.tasks[1].envelope_sha256, hash(JSON.stringify(envelope)));
+      assert.equal(result.operation.committed_result.transaction_committed, true);
+      assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), result);
+      assert.equal(io.calls.filter(call => call.aws?.[1] === 'describe-task-definition').length, 0);
+      assert.equal(io.calls.some(call => call.aws?.[0] === 'stepfunctions'), false);
+    } }, {}, undefined, { recovery: async () => witness });
+});
+
+test('the recorded #217 execution is accepted from its own artifact record through the legacy reader', async () => {
+  // (F) The recorded replay. The envelope is rebuilt from the artifact's own `cleanup_request`
+  // bytes with the recorded Service source/image, and its hash must be the recorded one. The
+  // record names state-machine version `:9` while this environment's is `:7`, which pins that the
+  // version ARN is deliberately not compared; the execution ARN is unqualified and matches.
+  assert.equal(hash(JSON.stringify(recordedEnvelope)), RECORDED_INPUT_SHA256);
+  assert.equal(deterministicCleanupExecutionName(recordedEnvelope, 0), RECORDED_NAME);
+  assert.equal(recordedRecord.operation.state_machine_version_arn.endsWith(':9'), true);
+  assert.equal(environment.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN.endsWith(':7'), true);
+  const witness = { record: recordedRecord, source: witnessSource({ artifact_id: 12527925184,
+    artifact_name: 'beta-account-reconcile-40012312740-1', file: 'service-cleanup-1-38851867995-1-0000000000000000.json' }) };
+  await run({ inputs: recordedInputs, proofEnvelope: recordedEnvelope,
+    existing: { 0: { status: 'SUCCEEDED', envelope: recordedEnvelope } },
+    // Seed the live description from the recorded record: the fixture's fixed dates and
+    // synthesized task ARNs would fail the Execution-output and Instance bindings otherwise.
+    description: () => ({ output: JSON.stringify(recordedRecord.operation.output),
+      startDate: new Date(recordedRecord.operation.started_at), stopDate: new Date(recordedRecord.operation.stopped_at) }),
+    missing: ['verification', 'cleanup'], logs: () => ({ events: [], nextForwardToken: 'end' }),
+    verify: async (execute, io, path) => {
+      const result = await execute();
+      assert.equal(result.operation.proof_status, 'verified');
+      assert.equal(result.operation.proof_origin, 'artifact');
+      assert.equal(result.operation.execution_name, RECORDED_NAME);
+      assert.equal(result.operation.execution_arn, recordedRecord.operation.execution_arn);
+      assert.equal(result.operation.committed_result.users, 0);
+      assert.equal(result.operation.committed_result.missingUsers, 1);
+      assert.equal(result.operation.committed_result.objects, 0);
+      assert.equal(result.operation.committed_result.objectsMissing, 0);
+      assert.equal(result.operation.committed_result.transaction_committed, true);
+      assert.deepEqual(result.operation.tasks.map(entry => entry.proof_origin), ['artifact', 'artifact']);
+      // The descent hash of the bytes the original run read is preserved; only the provenance
+      // changes, so a copy is never laundered as a live read.
+      assert.equal(result.operation.tasks[1].snapshot_sha256, recordedRecord.operation.tasks[1].snapshot_sha256);
+      assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), result);
+      assert.equal(io.calls.filter(call => call.aws?.[1] === 'describe-task-definition').length, 0);
+      assert.equal(io.calls.some(call => call.aws?.[0] === 'stepfunctions'), false);
+    } }, recordedEnvironment, undefined, { recovery: async () => witness });
+});
+
+test('a malformed ECS failure object refuses at task_proof and never consults a witness', async () => {
+  // (G) `detail: 'unexpected'` throws in `exactObject` before the MISSING test: absence and
+  // contradiction are different answers.
+  let recoveryCalls = 0;
+  const recovery = () => { recoveryCalls += 1; return { record: operationRecord(), source: witnessSource() }; };
+  await run({ existing: { 0: 'SUCCEEDED' }, missingMalformed: ['cleanup'], verify: async (execute, _io, path) => {
+    await assert.rejects(execute(), /identities retained/);
+    const operation = JSON.parse(await readFile(path, 'utf8')).operation;
+    assert.equal(operation.refusal_phase, 'task_proof');
+    assert.equal(operation.refusal_category, 'task_proof_unavailable');
+    assert.equal(Object.hasOwn(operation, 'committed_result'), false);
+    assert.equal(recoveryCalls, 0);
+  } }, {}, undefined, { recovery });
+});
+
+test('a witness that fails any binding is refused, never partially accepted', async () => {
+  // The binding table is the whole proof: an envelope, execution, instance, task or committed
+  // mismatch is a refusal at `task_proof`, and a source record that is not itself a live read is
+  // not a source at all.
+  const base = operationRecord();
+  const live = liveTaskEntries();
+  const variants = [
+    ['envelope hash', { ...base, operation: { ...base.operation, input_sha256: 'c'.repeat(64) } }],
+    ['envelope bytes', { ...base, operation: { ...base.operation, input: { ...envelope, service_commit_sha: 'c'.repeat(40) } } }],
+    ['execution name', { ...base, operation: { ...base.operation, execution_name: `${name0}x` } }],
+    ['execution arn', { ...base, operation: { ...base.operation, execution_arn: `${arn0}x` } }],
+    ['output', { ...base, operation: { ...base.operation, output: { ...output(), request_sha256: 'f'.repeat(64) } } }],
+    ['instance', { ...base, operation: { ...base.operation, stopped_at: '2026-10-10T00:00:09.000Z' } }],
+    ['task identity', { ...base, operation: { ...base.operation, tasks: [live[1], live[0]] } }],
+    ['committed counters', { ...base, operation: { ...base.operation, committed_result: committed({ transaction_committed: false }) } }],
+    ['artifact-stamped tasks', { ...base, operation: { ...base.operation, tasks: live.map(entry => ({ ...entry, proof_origin: 'artifact' })) } }],
+    ['foreign schema', { ...base, schema_version: 5 }],
+    ['refused source', { ...base, operation: { ...base.operation, proof_status: 'refused' } }],
+  ];
+  for (const [label, record] of variants) {
+    await run({ existing: { 0: 'SUCCEEDED' }, missing: ['verification', 'cleanup'],
+      logs: () => ({ events: [], nextForwardToken: 'end' }), verify: async (execute, _io, path) => {
+        await assert.rejects(execute(), /identities retained/, label);
+        const operation = JSON.parse(await readFile(path, 'utf8')).operation;
+        assert.equal(operation.refusal_phase, 'task_proof', label);
+        assert.equal(operation.refusal_category, 'task_proof_unavailable', label);
+        assert.equal(Object.hasOwn(operation, 'committed_result'), false, label);
+        assert.equal(Object.hasOwn(operation, 'artifact_source'), false, label);
+      } }, {}, undefined, { recovery: async () => ({ record, source: witnessSource() }) });
+  }
 });
 
 test('an absent generation 0 starts exactly once and verifies the committed result', async () => {

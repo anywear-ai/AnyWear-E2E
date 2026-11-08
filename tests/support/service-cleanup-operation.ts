@@ -75,8 +75,29 @@ export interface CleanupOperationResult {
   cleanup_log_stream_prefix: string;
 }
 
+/** Where the proof of a verified cleanup came from (#224). */
+export type CleanupProofOrigin = 'live' | 'marker' | 'artifact';
+
+/**
+ * The provenance of an artifact-tier proof: which uploaded record was read, and the digest of the
+ * bytes that named it. Diagnostics only; the decision never uses it.
+ */
+export interface CleanupArtifactSource {
+  artifact_id: number;
+  artifact_name: string;
+  artifact_digest: string;
+  file: string;
+  record_sha256: string;
+}
+
+/** One verified operation record, supplied by the caller as a durable proof of an execution. */
+export interface ArtifactWitness {
+  record: unknown;
+  source: CleanupArtifactSource;
+}
+
 export interface CleanupOperationEvidence {
-  schema_version: 3;
+  schema_version: 4;
   record_type: 'anywear_e2e_service_cleanup_operation';
   operation: {
     operation_mode: 'normal';
@@ -88,6 +109,10 @@ export interface CleanupOperationEvidence {
     stopped_at?: string;
     status: string;
     proof_status: 'pending' | 'verified' | 'refused';
+    /** Present only on a verified record; names the tier that produced the proof. */
+    proof_origin?: CleanupProofOrigin;
+    /** Present only on an artifact-tier record; names the record it was read from. */
+    artifact_source?: CleanupArtifactSource;
     input_sha256: string;
     input: CleanupOperationEnvelope;
     output?: CleanupOperationResult;
@@ -122,6 +147,13 @@ export interface CleanupOperationOptions {
    * already terminal non-success refuses, and no third name is derived.
    */
   migrationGeneration?: boolean;
+  /**
+   * The durable witness lookup (#224). Only the reconcile supplies it, and it is called only
+   * when the cleanup marker is absent and ECS can show neither stopped task. Its answer is one
+   * previously verified operation record for the exact execution, or `undefined`; every binding
+   * is re-proved here before a record can stand in for the live task read.
+   */
+  recovery?: (executionName: string, stoppedAt: string) => Promise<ArtifactWitness | undefined> | ArtifactWitness | undefined;
 }
 
 interface CanonicalTask {
@@ -358,7 +390,7 @@ async function observeTask(io: CleanupOperationIo, envelope: CleanupOperationEnv
   const tasks = array(response.tasks, 'Tasks');
   const missingFailure = failures.length === 1 ? exactObject(failures[0], 'Task failure', ['arn', 'reason']) : undefined;
   const missing = tasks.length === 0 && failures.length === 1 && missingFailure?.arn === taskArn && missingFailure.reason === 'MISSING';
-  if (missing) throw new Error('Cleanup task history fallback is unavailable');
+  if (missing) throw new CleanupTaskHistoryUnavailableError();
   if (failures.length !== 0 || tasks.length !== 1) throw new Error('Cleanup task cannot be observed');
   const liveTask = mapLiveTask(tasks[0]);
   if (liveTask.taskArn !== taskArn) throw new Error('Observed ECS task differs from the submitted task identity');
@@ -392,14 +424,25 @@ function validateCommitted(value: unknown, envelope: CleanupOperationEnvelope): 
   return result;
 }
 
-async function readCommitted(io: CleanupOperationIo, proof: Record<string, unknown>, envelope: CleanupOperationEnvelope): Promise<Record<string, unknown>> {
-  for (let attempt = 0; attempt < 15; attempt += 1) {
+/**
+ * Read one cleanup task's completion marker from its own log stream.
+ *
+ * The live tier passes the envelope hash the stopped cleanup task carried in its override and
+ * keeps the original fifteen-attempt wait; a durable tier passes the hash recomputed from the
+ * expected envelope and a single attempt, because absence must open the next tier rather than
+ * wait. Only an absent marker becomes `CleanupProofAbsentError`; a duplicate, malformed or
+ * unbound marker keeps its own error, which refuses at `completion_proof` and never falls
+ * through to another tier.
+ */
+async function readCommitted(io: CleanupOperationIo, envelope: CleanupOperationEnvelope, logStream: string,
+  envelopeSha256: string, attempts = 15): Promise<Record<string, unknown>> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const markers: string[] = [];
     let token: string | undefined;
     for (let page = 0; page < 20; page += 1) {
       let response: Record<string, unknown>;
       try {
-        response = object(await io.aws(['logs', 'get-log-events', '--log-group-name', LOG_GROUP, '--log-stream-name', String(proof.log_stream),
+        response = object(await io.aws(['logs', 'get-log-events', '--log-group-name', LOG_GROUP, '--log-stream-name', logStream,
           '--start-from-head', '--limit', '1000', ...(token ? ['--next-token', token] : [])]), 'Cleanup logs');
       } catch (error) {
         if (error instanceof Error && error.name === 'ResourceNotFoundException') break;
@@ -415,7 +458,7 @@ async function readCommitted(io: CleanupOperationIo, proof: Record<string, unkno
       if (response.nextForwardToken === token) {
         if (markers.length === 1) {
           const result = validateCommitted(parseStrictJson(markers[0]), envelope);
-          if (result.envelope_sha256 !== proof.envelope_sha256) throw new Error('Service completion does not bind the actual ECS envelope bytes');
+          if (result.envelope_sha256 !== envelopeSha256) throw new Error('Service completion does not bind the actual ECS envelope bytes');
           return result;
         }
         break;
@@ -423,9 +466,118 @@ async function readCommitted(io: CleanupOperationIo, proof: Record<string, unkno
       if (page === 19) throw new Error('Cleanup log pagination exceeded its bounded proof window');
       token = response.nextForwardToken;
     }
-    if (attempt < 14) await io.sleep(2_000);
+    if (attempt < attempts - 1) await io.sleep(2_000);
   }
-  throw new Error('Cleanup log completion marker was not observed within the bounded wait');
+  throw new CleanupProofAbsentError();
+}
+
+/**
+ * The uploaded operation records that may stand as a durable witness (#224): the lifecycle
+ * artifact's own teardown diagnostic, or a reconcile artifact's per-scope record.
+ */
+const WITNESS_ARTIFACT_NAME = /^(?:beta-account-lifecycle|beta-smoke-account-lifecycle|beta-account-reconcile)-[1-9][0-9]*-[1-9][0-9]*$/;
+const RECORD_SHA256 = /^[a-f0-9]{64}$/;
+/** Every member a v3 operation could carry; `failure`/`refusal_*` are deliberately absent. */
+const V3_OPERATION_MEMBERS = ['operation_mode', 'recovery_attempt', 'state_machine_version_arn', 'execution_arn',
+  'execution_name', 'started_at', 'stopped_at', 'status', 'proof_status', 'input_sha256', 'input', 'output', 'tasks',
+  'committed_result', 'preceding_execution'];
+/** The v4 members, which additionally require `proof_origin` and allow `artifact_source`. */
+const V4_OPERATION_MEMBERS = [...V3_OPERATION_MEMBERS, 'proof_origin', 'artifact_source'];
+const WITNESS_TASK_MEMBERS = ['task_arn', 'task_definition_arn', 'kind', 'status', 'exit_code', 'image_digest',
+  'service_commit_sha', 'log_group', 'log_stream', 'proof_origin', 'snapshot_sha256', 'envelope_sha256'];
+
+/**
+ * The one place a v3 record is accepted (#224).
+ *
+ * A v3 record can only have been written by the live tier, because the three-tier meaning of
+ * `proof_status: 'verified'` arrived with v4. The reader maps its `verified` to
+ * `proof_origin: 'live'` and leaves a v4 record untouched, so a v3 record can never be re-read
+ * as an artifact proof. A record that is not a complete verification keeps throwing.
+ */
+function readLegacyV3Operation(record: unknown): CleanupOperationEvidence {
+  const top = exactObject(record, 'Cleanup operation record', ['schema_version', 'record_type', 'operation']);
+  if (top.record_type !== 'anywear_e2e_service_cleanup_operation') throw new Error('Cleanup operation record has a foreign type');
+  if (top.schema_version === 4) return top as unknown as CleanupOperationEvidence;
+  if (top.schema_version !== 3) throw new Error('Cleanup operation record schema is neither 3 nor 4');
+  const operation = exactObject(top.operation, 'Cleanup operation', V3_OPERATION_MEMBERS);
+  if (operation.proof_status !== 'verified' || operation.status !== 'SUCCEEDED') {
+    throw new Error('Cleanup operation record is not a complete verification');
+  }
+  return { schema_version: 4, record_type: 'anywear_e2e_service_cleanup_operation',
+    operation: { ...operation, proof_origin: 'live' } as unknown as CleanupOperationEvidence['operation'] };
+}
+
+interface WitnessExpectation {
+  envelope: CleanupOperationEnvelope;
+  versionArn: string;
+  executionName: string;
+  output: CleanupOperationResult;
+  description: DescribeExecutionOutput;
+}
+
+/**
+ * Re-prove one durable witness against the execution this dispatch just observed (#224).
+ *
+ * Every binding in `### How the proof stays bound` is checked here, and there is no partial
+ * acceptance: the witness must be one complete live verification of this exact execution, its
+ * envelope, its output and its instance. The written record then restates the source and stamps
+ * each accepted task entry `proof_origin: 'artifact'`, so a copy is never laundered as a live
+ * read.
+ */
+function validateArtifactWitness(witness: ArtifactWitness, expected: WitnessExpectation):
+{ tasks: Record<string, unknown>[]; committed_result: Record<string, unknown> } {
+  const value = object(witness, 'Artifact witness');
+  const source = exactObject(value.source, 'Artifact witness source',
+    ['artifact_id', 'artifact_name', 'artifact_digest', 'file', 'record_sha256']);
+  if (!Number.isSafeInteger(source.artifact_id) || (source.artifact_id as number) < 1
+    || typeof source.artifact_name !== 'string' || !WITNESS_ARTIFACT_NAME.test(source.artifact_name)
+    || typeof source.artifact_digest !== 'string' || !DIGEST.test(source.artifact_digest)
+    || typeof source.file !== 'string' || source.file.length === 0
+    || typeof source.record_sha256 !== 'string' || !RECORD_SHA256.test(source.record_sha256)) {
+    throw new Error('Artifact witness source is malformed');
+  }
+  const record = readLegacyV3Operation(value.record);
+  const operation = exactObject(record.operation, 'Cleanup operation', V4_OPERATION_MEMBERS);
+  if (operation.proof_status !== 'verified' || operation.status !== 'SUCCEEDED' || operation.proof_origin !== 'live'
+    || operation.artifact_source !== undefined) throw new Error('Artifact witness is not a complete live verification');
+  if (operation.execution_name !== expected.executionName
+    || operation.execution_arn !== cleanupExecutionArn(expected.versionArn, expected.executionName)) {
+    throw new Error('Artifact witness does not name this exact deterministic execution');
+  }
+  const envelopeSha256 = hash(JSON.stringify(expected.envelope));
+  if (operation.input_sha256 !== envelopeSha256 || !isDeepStrictEqual(operation.input, expected.envelope)) {
+    throw new Error('Artifact witness does not bind the expected envelope and Service source/image');
+  }
+  const output = validateResult(operation.output, expected.envelope);
+  if (!isDeepStrictEqual(output, expected.output)) throw new Error('Artifact witness does not carry the observed execution output');
+  const startedAt = expected.description.startDate?.toISOString();
+  const stoppedAt = expected.description.stopDate?.toISOString();
+  if (!startedAt || !stoppedAt || operation.started_at !== startedAt || operation.stopped_at !== stoppedAt) {
+    throw new Error('Artifact witness does not describe the observed execution instance');
+  }
+  const entries = array(operation.tasks, 'Artifact witness tasks');
+  if (entries.length !== 2) throw new Error('Artifact witness must carry exactly two task entries');
+  const tasks = entries.map((entry, index) => {
+    const purpose = index === 0 ? 'verification' : 'cleanup';
+    const task = exactObject(entry, 'Artifact witness task', WITNESS_TASK_MEMBERS);
+    const taskArn = output[`${purpose}_task_arn`];
+    const definitionArn = output[`${purpose}_task_definition_arn`];
+    const streamPrefix = output[`${purpose}_log_stream_prefix`];
+    if (task.task_arn !== taskArn || task.task_definition_arn !== definitionArn || task.kind !== purpose
+      || task.status !== 'STOPPED' || task.exit_code !== 0
+      || task.image_digest !== expected.envelope.service_image_digest || task.service_commit_sha !== expected.envelope.service_commit_sha
+      || task.log_group !== LOG_GROUP || task.log_stream !== `${streamPrefix}/OneShot/${TASK_ARN.exec(taskArn)![1]}`
+      || typeof task.snapshot_sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(task.snapshot_sha256)
+      || task.proof_origin !== 'live') {
+      throw new Error('Artifact witness task does not bind its exact stopped task and provenance');
+    }
+    return { ...task, proof_origin: 'artifact' };
+  });
+  const committed = validateCommitted(operation.committed_result, expected.envelope);
+  if (committed.envelope_sha256 !== envelopeSha256) {
+    throw new Error('Artifact witness committed result does not bind the expected envelope bytes');
+  }
+  return { tasks, committed_result: committed };
 }
 
 function defaultIo(versionArn: string): CleanupOperationIo {
@@ -513,6 +665,40 @@ export class CleanupDeadlineExceededError extends Error {
   constructor() {
     super('Cleanup wait reached the caller\'s in-job deadline');
     this.name = 'CleanupDeadlineExceeded';
+  }
+}
+
+/**
+ * ECS answered the exact registered `{arn, reason: 'MISSING'}` shape for one leg (#224).
+ *
+ * It is an absence, not a contradiction: the stopped task has aged out of ECS's one-hour
+ * retention, so a durable tier may prove the same execution instead. Every other shape — a
+ * malformed failure object, a foreign task, a task that fails `validateCanonicalTask` — keeps
+ * its own error and refuses at `task_proof` without consulting a witness. The message is
+ * unchanged from the bare error this replaces.
+ */
+export class CleanupTaskHistoryUnavailableError extends Error {
+  readonly code = 'E2E_CLEANUP_TASK_HISTORY_UNAVAILABLE';
+
+  constructor() {
+    super('Cleanup task history fallback is unavailable');
+    this.name = 'CleanupTaskHistoryUnavailable';
+  }
+}
+
+/**
+ * The completion marker is absent from a cleanup stream that was read (#224).
+ *
+ * `readCommitted` throws this only when no marker was observed within its bounded read; a
+ * duplicate, malformed or unbound marker keeps its own error and refuses at `completion_proof`.
+ * The message is unchanged from the bare error it replaces.
+ */
+export class CleanupProofAbsentError extends Error {
+  readonly code = 'E2E_CLEANUP_PROOF_ABSENT';
+
+  constructor() {
+    super('Cleanup log completion marker was not observed within the bounded wait');
+    this.name = 'CleanupProofAbsent';
   }
 }
 
@@ -629,7 +815,7 @@ export async function runCleanupOperation(inputs: ServiceCleanupInputs, environm
   const current = [expectedExecution(envelope, versionArn, 0), expectedExecution(envelope, versionArn, 1)];
   const transport = io ?? defaultIo(versionArn);
   const path = environment.E2E_SERVICE_CLEANUP_EVIDENCE_PATH ?? 'test-results/service-cleanup-operation.json';
-  const evidence: CleanupOperationEvidence = { schema_version: 3, record_type: 'anywear_e2e_service_cleanup_operation',
+  const evidence: CleanupOperationEvidence = { schema_version: 4, record_type: 'anywear_e2e_service_cleanup_operation',
     operation: { operation_mode: 'normal', state_machine_version_arn: current[0].versionArn, execution_arn: current[0].arn,
       execution_name: current[0].name, status: 'PENDING', proof_status: 'pending',
       input_sha256: hash(JSON.stringify(current[0].envelope)), input: current[0].envelope } };
@@ -666,17 +852,77 @@ export async function runCleanupOperation(inputs: ServiceCleanupInputs, environm
     await writeEvidence(path, evidence);
     refusalPhase = 'task_proof';
     refusalCategory = 'task_proof_unavailable';
-    const verification = await observeTask(transport, proofEnvelope, output.verification_task_arn, output.verification_task_definition_arn);
-    const cleanup = await observeTask(transport, proofEnvelope, output.cleanup_task_arn, output.cleanup_task_definition_arn);
-    if (verification.kind !== 'verification' || cleanup.kind !== 'cleanup') throw new Error('Cleanup tasks exchanged their fixed purposes');
-    evidence.operation.tasks = [verification, cleanup];
-    await writeEvidence(path, evidence);
+    // Both legs are attempted in the unchanged order. A clean `MISSING` is an absence that opens
+    // the durable tiers; every other answer — a malformed failure object, a foreign task, a task
+    // that fails `validateCanonicalTask` — is a contradiction and refuses here without a witness.
+    const observed: { verification?: Record<string, unknown>; cleanup?: Record<string, unknown> } = {};
+    const missing: ('verification' | 'cleanup')[] = [];
+    for (const purpose of ['verification', 'cleanup'] as const) {
+      try {
+        observed[purpose] = await observeTask(transport, proofEnvelope, output[`${purpose}_task_arn`],
+          output[`${purpose}_task_definition_arn`]);
+      } catch (error) {
+        if (!(error instanceof CleanupTaskHistoryUnavailableError)) throw error;
+        missing.push(purpose);
+      }
+    }
+    const envelopeSha256 = hash(JSON.stringify(proofEnvelope));
+    if (missing.length === 0) {
+      // Tier 1, the strong live proof: unchanged four ECS calls and the unchanged marker wait.
+      const verification = observed.verification!;
+      const cleanup = observed.cleanup!;
+      if (verification.kind !== 'verification' || cleanup.kind !== 'cleanup') throw new Error('Cleanup tasks exchanged their fixed purposes');
+      evidence.operation.tasks = [verification, cleanup];
+      await writeEvidence(path, evidence);
+      refusalPhase = 'completion_proof';
+      refusalCategory = 'completion_proof_unavailable';
+      evidence.operation.committed_result = await readCommitted(transport, proofEnvelope, String(cleanup.log_stream),
+        String(cleanup.envelope_sha256), 15);
+      evidence.operation.proof_origin = 'live';
+      evidence.operation.proof_status = 'verified';
+      await writeEvidence(path, evidence);
+      return evidence;
+    }
+    // Tier 2: at least one leg has aged out of ECS. The marker is read once, from the cleanup
+    // stream the validated output names, and binds the live cleanup task's own envelope hash when
+    // that leg is still observable or the recomputed expected hash when it is not.
+    const liveEnvelopeSha256 = typeof observed.cleanup?.envelope_sha256 === 'string' ? observed.cleanup.envelope_sha256 : undefined;
+    const logStream = `${output.cleanup_log_stream_prefix}/OneShot/${TASK_ARN.exec(output.cleanup_task_arn)![1]}`;
     refusalPhase = 'completion_proof';
     refusalCategory = 'completion_proof_unavailable';
-    evidence.operation.committed_result = await readCommitted(transport, cleanup, proofEnvelope);
-    evidence.operation.proof_status = 'verified';
-    await writeEvidence(path, evidence);
-    return evidence;
+    let committed: Record<string, unknown> | undefined;
+    try {
+      committed = await readCommitted(transport, proofEnvelope, logStream, liveEnvelopeSha256 ?? envelopeSha256, 1);
+    } catch (error) {
+      if (!(error instanceof CleanupProofAbsentError)) throw error;
+    }
+    if (committed) {
+      evidence.operation.proof_origin = 'marker';
+      evidence.operation.committed_result = committed;
+      evidence.operation.proof_status = 'verified';
+      await writeEvidence(path, evidence);
+      return evidence;
+    }
+    // Tier 3: only both absences open the archived record, because an archived record must never
+    // stand in for a task ECS can still show. One observed leg with no marker refuses.
+    refusalPhase = 'task_proof';
+    refusalCategory = 'task_proof_unavailable';
+    if (missing.length === 2 && options.recovery) {
+      const stoppedAt = description.stopDate?.toISOString();
+      if (!stoppedAt) throw new Error('Cleanup execution has no stop instant to bind a durable witness');
+      const witness = await options.recovery(evidence.operation.execution_name, stoppedAt);
+      if (!witness) throw new Error('Cleanup task history fallback is unavailable');
+      const validated = validateArtifactWitness(witness, { envelope: proofEnvelope,
+        versionArn: evidence.operation.state_machine_version_arn, executionName: evidence.operation.execution_name, output, description });
+      evidence.operation.proof_origin = 'artifact';
+      evidence.operation.artifact_source = witness.source;
+      evidence.operation.tasks = validated.tasks;
+      evidence.operation.committed_result = validated.committed_result;
+      evidence.operation.proof_status = 'verified';
+      await writeEvidence(path, evidence);
+      return evidence;
+    }
+    throw new Error('Cleanup task history fallback is unavailable');
   };
   try {
     // Generation 0. The ordinary dispatch resolves the current operation; an absent
