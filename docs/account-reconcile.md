@@ -60,7 +60,8 @@ rather than truncating.
   `account-budget-oldest-client.json`, `service-cleanup-operation.json` and
   `service-cleanup-run.json`. The smoke artifact carries the first, third and fourth. Every
   `account-budget*.json` present is read as a manifest, so the addresses feed one identity
-  set; the two cleanup diagnostics are ignored. The oldest-client manifest is no longer
+  set; `service-cleanup-operation.json` is indexed as a durable cleanup witness source, and
+  `service-cleanup-run.json` is not read. The oldest-client manifest is no longer
   produced for new runs since #256 removed the oldest-Client leg, but it stays in the closed
   set because runs recorded before that change still uploaded it. Any other name, a
   directory, a symlink, a duplicate or an over-bound file refuses the artifact. No specific
@@ -72,6 +73,19 @@ rather than truncating.
   still checked against the qualification role, so the identity is attributable even though the
   record's `origin` carries no role field. A creation by any other principal is reported as
   `unattributable_caller` and **never deleted**.
+
+The reconcile also reads its own `beta-account-reconcile-<run>-<attempt>` artifact family,
+under the same protected-run binding the lifecycle family uses: `account-reconcile.json` and
+`deployment-evidence.json` are its diagnostics, and every
+`service-cleanup-<index>-<scope>.json` is one per-scope Service cleanup operation record. A
+cleanup is proved by the strongest evidence that survives: first the live ECS tasks and the
+unique `ANYWEAR_BETA_CLEANUP_RESULT=` completion marker, then the marker alone once a stopped
+task has aged out of ECS's one-hour retention, and last a previously verified operation record
+for that exact execution from either artifact family. A record accepted this way is bound to
+the execution, envelope, request, run scope, instance and committed counters being re-proved,
+is stamped `proof_origin: artifact` with its source named, and never stands in for a task ECS
+can still return. When none of the three survives, the cleanup is refused at `task_proof`
+and the identity stays `retained` and unresolved.
 
 A manifest entry is authoritative for its address, captured subject and run. Every
 non-`deleted` worker record is a leftover: `reserved`, `provisioning`, `in_use` and

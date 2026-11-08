@@ -482,14 +482,21 @@ permissions for the two Beta DLQs, while tester-allowlist controls remain outsid
 None of these operations deploy CDK, change the tester allowlist, or revive the retired
 runtime drill.
 
-Operation evidence uses schema 3 and records initiation, observed terminal state,
-and a separate `proof_status`. Step Functions success alone does not permit identity
-deletion: E2E rechecks the exact execution input/version, both stopped ECS tasks,
-their immutable definitions, image/source, fixed command and log paths, and the
-unique `ANYWEAR_BETA_CLEANUP_RESULT=` Service completion marker. The marker's envelope
-hash binds the actual ECS command bytes, while its request hash binds the original
-captured worker JSON. Requests exceeding ECS's 8192-byte serialized override bound
-are rejected before starting an execution.
+Operation evidence uses schema 4 and records initiation, observed terminal state,
+a separate `proof_status`, and the `proof_origin` that produced a verified proof. Step
+Functions success alone does not permit identity deletion: E2E first rechecks the exact
+execution input/version, both stopped ECS tasks, their immutable definitions,
+image/source, fixed command and log paths, and the unique
+`ANYWEAR_BETA_CLEANUP_RESULT=` Service completion marker. When a stopped task has aged
+out of ECS's one-hour retention, the same proof is read once from that cleanup task's own
+completion marker in its execution-output stream; when that marker has expired as well, a
+previously verified operation record for the exact execution, uploaded with an earlier
+run's artifact, stands in its place with its envelope, request, execution, instance, task
+identities and committed counters all re-proved. A cleanup with none of those surviving
+refuses at `task_proof` and the identity stays retained. The marker's envelope hash binds
+the actual ECS command bytes, while its request hash binds the original captured worker
+JSON. Requests exceeding ECS's 8192-byte serialized override bound are rejected before
+starting an execution.
 
 DLQ counters may include messages that the fixed Service implementation proves
 belong to deleted terminal tasks. E2E validates nonnegative counters and refuses an

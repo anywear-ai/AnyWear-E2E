@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -9,6 +10,7 @@ import {
   buildIdentitySet,
   buildReconcileRecord,
   classifyLifecycleArchive,
+  classifyReconcileArchive,
   cleanupGroups,
   cleanupRequest,
   collectLifecycleArtifacts,
@@ -20,10 +22,12 @@ import {
   lookbackDaysOfWindow,
   manifestIdentities,
   maxArtifactsForWindow,
+  maxReconcileArtifactsForWindow,
   normalizeAccountStatus,
   objectAction,
   parseCreateUserEvents,
   parseManifestArtifactName,
+  parseReconcileArtifactName,
   qualificationSession,
   readManifest,
   reconcileAccounts,
@@ -36,9 +40,11 @@ import {
   RECONCILE_CLOUDTRAIL_MARGIN_MS,
   RECONCILE_MAX_USERS_PER_REQUEST,
   RECONCILE_MIGRATION_WINDOW_DAYS,
+  RECONCILE_RECORD_ARTIFACTS_PER_DAY,
   RECONCILE_RECORD_TYPE,
   RECONCILE_SCHEMA_VERSION,
   RECONCILE_WINDOW_DAYS,
+  RECONCILE_WITNESS_ARTIFACT_READS,
   REPORTED_REASONS,
   UNRESOLVED_REASONS,
 } from './reconcile-accounts.mjs';
@@ -171,6 +177,73 @@ function unrelatedArtifact(index) {
     digest: `sha256:${'c'.repeat(64)}`,
     workflow_run: { id: 50_000 + index, head_branch: 'main', head_sha: HEAD_SHA, repository_id: E2E_REPOSITORY_ID, head_repository_id: E2E_REPOSITORY_ID },
   };
+}
+
+/** The execution a reconcile-side witness test proves, and its own stop instant (#224). */
+const WITNESS_EXECUTION = 'beta-cleanup-123-1-0123456789abcdef-0123456789abcdef';
+const WITNESS_STOPPED_AT = new Date(NOW - 3 * DAY).toISOString();
+
+/** One verified live-root Service cleanup operation record, as an uploaded artifact carries it. */
+function cleanupRecord({ executionName = WITNESS_EXECUTION, schemaVersion = 4, proofOrigin = 'live', tasks, patch = {} } = {}) {
+  return { schema_version: schemaVersion, record_type: 'anywear_e2e_service_cleanup_operation', operation: {
+    operation_mode: 'normal',
+    state_machine_version_arn: 'arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:7',
+    execution_arn: `arn:aws:states:ap-east-1:650880818323:execution:beta-anywear-tester-cleanup:${executionName}`,
+    execution_name: executionName, started_at: WITNESS_STOPPED_AT, stopped_at: WITNESS_STOPPED_AT,
+    status: 'SUCCEEDED', proof_status: 'verified', ...(schemaVersion === 4 ? { proof_origin: proofOrigin } : {}),
+    input_sha256: 'a'.repeat(64), input: {}, output: {},
+    tasks: tasks ?? [
+      { task_arn: `arn:aws:ecs:ap-east-1:650880818323:task/beta-anywear/${'1'.repeat(32)}`, kind: 'verification', proof_origin: 'live' },
+      { task_arn: `arn:aws:ecs:ap-east-1:650880818323:task/beta-anywear/${'2'.repeat(32)}`, kind: 'cleanup', proof_origin: 'live' },
+    ],
+    committed_result: { envelope_sha256: 'b'.repeat(64), transaction_committed: true, objects: 2, objectsMissing: 0 }, ...patch } };
+}
+
+/** One reconcile-family artifact: its two diagnostics and any per-scope operation records. */
+function reconcileArtifactFixture(index, { runId = 124, attempt = 1, createdAt = new Date(NOW - DAY).toISOString(),
+  records = [], headBranch = 'main', run = {} } = {}) {
+  const entries = ['account-reconcile.json', 'deployment-evidence.json']
+    .map(name => ({ name, size: 200, directory: false, symlink: false }));
+  for (const { file, record } of records) {
+    const bytes = Buffer.from(JSON.stringify(record));
+    entries.push({ name: file, size: bytes.length, directory: false, symlink: false, bytes });
+  }
+  return {
+    entry: { id: index + 1, name: `beta-account-reconcile-${runId}-${attempt}`, expired: false, created_at: createdAt,
+      digest: `sha256:${'b'.repeat(64)}`,
+      workflow_run: { id: runId, head_branch: headBranch, head_sha: HEAD_SHA, repository_id: E2E_REPOSITORY_ID, head_repository_id: E2E_REPOSITORY_ID } },
+    entries,
+    run: { path: '.github/workflows/beta-qualification.yml', event: 'workflow_dispatch', head_branch: 'main', head_sha: HEAD_SHA, ...run },
+  };
+}
+
+/** One lifecycle artifact whose teardown diagnostic is a verified cleanup operation record (#224). */
+function lifecycleArtifactWithDiagnostic(index, record, { runId = 123, attempt = 1,
+  createdAt = new Date(NOW - 2 * DAY).toISOString(), accounts = [manifestRecord({ subject: subject(1) })] } = {}) {
+  const fixture = artifactFixture(index, { runId, attempt, manifest: manifestFixture(runId, attempt, accounts).manifest });
+  fixture.entry.created_at = createdAt;
+  fixture.entries = fixture.entries.map(entry => entry.name === 'service-cleanup-operation.json'
+    ? { ...entry, bytes: Buffer.from(JSON.stringify(record)) } : entry);
+  return fixture;
+}
+
+/**
+ * Run one reconcile whose fake Service cleanup asks the lookup for the witness, the way the real
+ * verifier does once the marker and both ECS tasks are gone. The fake returns `verified` only
+ * when the lookup answers, so the reconcile record reflects what the lookup decided.
+ */
+async function witnessRun({ artifacts, users = [], executionName = WITNESS_EXECUTION, stoppedAt = WITNESS_STOPPED_AT }) {
+  let witness;
+  let lookups = 0;
+  const harnessed = harness({ artifacts, users, cleanup: async (_inputs, _environment, options) => {
+    lookups += 1;
+    witness = await options.recovery(executionName, stoppedAt);
+    return witness ? { proof_status: 'verified', committed_result: committedResult() } : { proof_status: 'refused' };
+  } });
+  const logs = [];
+  const outcome = await reconcileAccounts({ io: harnessed.io, now: NOW, runIdentity, window: reconcileWindow(NOW), environment: {},
+    log: line => logs.push(line) });
+  return { ...outcome, harnessed, logs, getWitness: () => witness, lookups: () => lookups };
 }
 
 function harness({ artifacts = [], events = [], users = [], cleanup = async () => ({ proof_status: 'verified', committed_result: committedResult() }), readArtifact } = {}) {
@@ -1379,4 +1452,208 @@ test('a non-worker record beside a reconcilable identity is reported, and the re
   assert.equal(harnessed.calls.some((call) => call.get === 'e2e-functional-account@anywear.local'), false);
   assert.equal(recordAnnotations(record).errors.length, 0);
   assert.equal(recordAnnotations(record).warnings.length, 1);
+});
+
+test('the reconcile artifact name, upload set and per-day bound are closed', () => {
+  // #224: the reconcile family is named by its own parser and the same protected-run binding.
+  assert.deepEqual(parseReconcileArtifactName('beta-account-reconcile-40012312740-1'), { smoke: false, runId: 40012312740, attempt: 1 });
+  for (const name of ['beta-account-reconcile-0-1', 'beta-account-reconcile-1', 'beta-account-reconcile-1-0',
+    'beta-account-lifecycle-1-1', 'beta-account-reconcile-1-1-extra']) {
+    assert.equal(parseReconcileArtifactName(name), undefined, name);
+  }
+
+  const entry = (name, extra = {}) => ({ name, size: 210, ...extra });
+  assert.deepEqual(classifyReconcileArchive([
+    entry('account-reconcile.json'), entry('deployment-evidence.json'),
+    entry('service-cleanup-0-38851867995-1-0000000000000000.json'), entry('service-cleanup-3-123-1-0123456789abcdef.json'),
+  ]), { records: ['service-cleanup-0-38851867995-1-0000000000000000.json', 'service-cleanup-3-123-1-0123456789abcdef.json'] });
+  assert.deepEqual(classifyReconcileArchive([entry('account-reconcile.json')]), { records: [] });
+  for (const name of ['account-budget.json', 'service-cleanup-1-123-1.json', 'test-results/account-reconcile.json',
+    'service-cleanup--1-1-0123456789abcdef.json', 'service-cleanup-1-0-1-0123456789abcdef.json']) {
+    assert.throws(() => classifyReconcileArchive([entry(name)]), /unknown file/, name);
+  }
+  assert.throws(() => classifyReconcileArchive([entry('account-reconcile.json', { directory: true })]), /directory or symlink/);
+  assert.throws(() => classifyReconcileArchive([entry('deployment-evidence.json', { symlink: true })]), /directory or symlink/);
+  assert.throws(() => classifyReconcileArchive([entry('account-reconcile.json'), entry('account-reconcile.json')]), /repeats/);
+  assert.throws(() => classifyReconcileArchive([entry('account-reconcile.json', { size: LIFECYCLE_FILE_MAX_BYTES + 1 })]), /over its bound/);
+  assert.throws(() => classifyReconcileArchive([]), /empty/);
+
+  const week = reconcileWindow(NOW);
+  const migration = reconcileWindow(NOW, RECONCILE_MIGRATION_WINDOW_DAYS);
+  assert.equal(RECONCILE_RECORD_ARTIFACTS_PER_DAY, 9);
+  assert.equal(maxReconcileArtifactsForWindow(week), RECONCILE_WINDOW_DAYS * RECONCILE_RECORD_ARTIFACTS_PER_DAY);
+  assert.equal(maxReconcileArtifactsForWindow(migration), RECONCILE_MIGRATION_WINDOW_DAYS * RECONCILE_RECORD_ARTIFACTS_PER_DAY);
+  assert.equal(RECONCILE_WITNESS_ARTIFACT_READS, 40);
+});
+
+test('one artifact-list walk carries both families, and each keeps its own per-day bound', async () => {
+  const window = reconcileWindow(NOW);
+  const lifecycle = retainedFixture();
+  const reconcile = reconcileArtifactFixture(5, { runId: 300 });
+  const collected = await collectLifecycleArtifacts({ window, fetchPage: artifactPages([unrelatedArtifact(0), lifecycle.entry, reconcile.entry]) });
+  assert.deepEqual(collected.map((row) => row.name).sort(), [lifecycle.entry.name, reconcile.entry.name].sort());
+  assert.ok(collected.every((row) => row.created_at !== undefined));
+
+  // The reconcile family refuses its sixty-fourth row, exactly as the lifecycle family does.
+  const reconcileRows = Array.from({ length: maxReconcileArtifactsForWindow(window) + 1 },
+    (_, index) => reconcileArtifactFixture(100 + index, { runId: 500 + index }).entry);
+  await assert.rejects(collectLifecycleArtifacts({ window, fetchPage: artifactPages(reconcileRows) }),
+    /Reconcile artifacts in the window exceed/);
+  // At the bound, a reconcile row never consumes one unit of the lifecycle bound.
+  const atBound = await collectLifecycleArtifacts({ window, fetchPage: artifactPages(reconcileRows.slice(0, -1)) });
+  assert.equal(atBound.length, maxReconcileArtifactsForWindow(window));
+
+  // A name in neither family is still a dispatch mistake, not an ignored row.
+  const harnessed = harness({ artifacts: [] });
+  await assert.rejects(reconcileAccounts({
+    io: { ...harnessed.io, async listArtifacts() { return [{ ...reconcile.entry, name: 'playwright-report-1' }]; } },
+    now: NOW, runIdentity, window, environment: {},
+  }), /non-lifecycle artifact/);
+});
+
+test('a reconcile-family record answers the witness lookup and resolves the identity as already absent', async () => {
+  // The retained identity comes from the lifecycle family; the verified record for its exact
+  // execution survives in a reconcile artifact, so the cleanup is proved without ECS.
+  const record = cleanupRecord();
+  const cleanupFile = 'service-cleanup-0-123-1-0123456789abcdef.json';
+  const reconcileArtifact = reconcileArtifactFixture(10, { runId: 400, records: [{ file: cleanupFile, record }] });
+  const run = await witnessRun({ artifacts: [retainedFixture(), reconcileArtifact] });
+  assert.equal(run.result, 'passed');
+  assert.equal(run.lookups(), 1);
+  assert.deepEqual(run.record.identities[0].actions,
+    { service_cleanup: 'committed', cognito: 'already_absent', objects: 'deleted', readback: 'absent' });
+  assert.equal(run.record.identities[0].outcome, 'already_absent');
+  assert.deepEqual(run.record.unresolved, []);
+  // `sources.artifacts` still counts the lifecycle family only.
+  assert.equal(run.record.sources.artifacts, 1);
+  const witness = run.getWitness();
+  assert.equal(witness.record.operation.execution_name, WITNESS_EXECUTION);
+  assert.deepEqual(witness.source, { artifact_id: reconcileArtifact.entry.id, artifact_name: reconcileArtifact.entry.name,
+    artifact_digest: reconcileArtifact.entry.digest, file: cleanupFile,
+    record_sha256: createHash('sha256').update(JSON.stringify(record)).digest('hex') });
+  assert.equal(run.logs.some((line) => line.includes(`cleanup record for ${WITNESS_EXECUTION} read from`)), true);
+});
+
+test('the earliest of two identical live-root records is the witness', async () => {
+  const record = cleanupRecord();
+  const file = 'service-cleanup-0-123-1-0123456789abcdef.json';
+  const early = reconcileArtifactFixture(10, { runId: 400, createdAt: new Date(NOW - 2 * DAY).toISOString(), records: [{ file, record }] });
+  const late = reconcileArtifactFixture(11, { runId: 401, createdAt: new Date(NOW - DAY).toISOString(), records: [{ file, record }] });
+  const run = await witnessRun({ artifacts: [retainedFixture(), late, early] });
+  assert.equal(run.getWitness().source.artifact_name, early.entry.name);
+  assert.equal(run.record.identities[0].outcome, 'already_absent');
+});
+
+test('a refused record and an artifact-stamped record are never witnesses', async () => {
+  const file = 'service-cleanup-0-123-1-0123456789abcdef.json';
+  const live = cleanupRecord();
+  const cases = [
+    ['refused', cleanupRecord({ patch: { proof_status: 'refused' } })],
+    ['artifact', cleanupRecord({ proofOrigin: 'artifact',
+      tasks: [live.operation.tasks[0], { ...live.operation.tasks[1], proof_origin: 'artifact' }] })],
+  ];
+  for (const [label, record] of cases) {
+    const artifact = reconcileArtifactFixture(10, { runId: 400, records: [{ file, record }] });
+    const run = await witnessRun({ artifacts: [retainedFixture(), artifact] });
+    assert.equal(run.getWitness(), undefined, label);
+    // The candidate was read and inspected; it is simply not a source.
+    assert.equal(run.harnessed.calls.filter((call) => call.artifact === artifact.entry.id).length, 1, label);
+    assert.deepEqual(run.record.unresolved.map((entry) => entry.reason), ['service_cleanup_refused'], label);
+  }
+});
+
+test('a conflicting duplicate for one execution drops the name and refuses the identity', async () => {
+  const first = cleanupRecord();
+  const second = cleanupRecord({ patch: { input_sha256: 'c'.repeat(64) } });
+  const early = lifecycleArtifactWithDiagnostic(20, first, { runId: 400 });
+  const late = lifecycleArtifactWithDiagnostic(21, second, { runId: 401, createdAt: new Date(NOW - DAY).toISOString() });
+  const run = await witnessRun({ artifacts: [retainedFixture(), early, late] });
+  assert.equal(run.getWitness(), undefined);
+  assert.equal(run.logs.some((line) => line.includes('appears in two artifacts with different bytes')), true);
+  assert.deepEqual(run.record.unresolved.map((entry) => entry.reason), ['service_cleanup_refused']);
+});
+
+test('a lifecycle artifact diagnostic is a witness source at no extra read', async () => {
+  const record = cleanupRecord();
+  const lifecycle = lifecycleArtifactWithDiagnostic(20, record, { runId: 123 });
+  const run = await witnessRun({ artifacts: [lifecycle] });
+  assert.equal(run.getWitness().source.artifact_name, lifecycle.entry.name);
+  assert.equal(run.getWitness().source.file, 'service-cleanup-operation.json');
+  assert.equal(run.getWitness().record.operation.execution_name, WITNESS_EXECUTION);
+  // The diagnostic was already downloaded with the manifest read; the lookup read nothing more.
+  assert.equal(run.harnessed.calls.filter((call) => call.artifact === lifecycle.entry.id).length, 1);
+  assert.equal(run.record.identities[0].outcome, 'already_absent');
+});
+
+test('a corrupt lifecycle cleanup diagnostic is skipped, not a source failure', async () => {
+  // The diagnostics were ignored before #224, so a corrupt one contributes no witness and must not
+  // turn an otherwise valid reconcile into a source failure; the skip is logged.
+  const lifecycle = artifactFixture(0, { runId: 123,
+    manifest: manifestFixture(123, 1, [manifestRecord({ subject: subject(1) })]).manifest });
+  lifecycle.entries = lifecycle.entries.map((entry) => entry.name === 'service-cleanup-operation.json'
+    ? { ...entry, bytes: Buffer.from('{not-json') } : entry);
+  const harnessed = harness({ artifacts: [lifecycle], users: [{ email: stable(0), sub: subject(1) }] });
+  const logs = [];
+  const { record, result } = await reconcileAccounts({
+    io: harnessed.io, now: NOW, runIdentity, window: reconcileWindow(NOW), environment: {}, log: (line) => logs.push(line),
+  });
+  assert.equal(result, 'passed');
+  assert.equal(record.identities[0].outcome, 'reconciled');
+  assert.equal(logs.some((line) => line.includes(`ignored an unreadable cleanup diagnostic in ${lifecycle.entry.name}`)), true);
+});
+
+test('the witness lookup reads at most forty candidate artifacts per execution', async () => {
+  const artifacts = [retainedFixture(), ...Array.from({ length: RECONCILE_WITNESS_ARTIFACT_READS + 1 },
+    (_, index) => reconcileArtifactFixture(100 + index, { runId: 500 + index }))];
+  const run = await witnessRun({ artifacts });
+  assert.equal(run.getWitness(), undefined);
+  const reconcileReads = run.harnessed.calls.filter((call) => typeof call.artifact === 'number' && call.artifact > 100);
+  assert.equal(reconcileReads.length, RECONCILE_WITNESS_ARTIFACT_READS);
+});
+
+test('a witness resolves from the rows the production collector builds, not a hand-written row', async () => {
+  // Regression: `collectLifecycleArtifacts` is the production listing, and the lookup filters on
+  // `expired === false`. A collected row that dropped the flag silently closed the artifact tier
+  // in production and re-created the exact #224 defect once the marker's retention passed.
+  const lifecycle = retainedFixture();
+  const record = cleanupRecord();
+  const reconcileArtifact = reconcileArtifactFixture(10, { runId: 400,
+    records: [{ file: 'service-cleanup-0-123-1-0123456789abcdef.json', record }] });
+  const window = reconcileWindow(NOW);
+  const collected = await collectLifecycleArtifacts({ window,
+    fetchPage: artifactPages([lifecycle.entry, reconcileArtifact.entry]) });
+  const reconcileRow = collected.find((row) => row.name === reconcileArtifact.entry.name);
+  assert.equal(reconcileRow.expired, false, 'the collector row must state the flag the lookup filters on');
+  let witness;
+  const harnessed = harness({ artifacts: [lifecycle, reconcileArtifact], users: [],
+    cleanup: async (_inputs, _environment, options) => {
+      witness = await options.recovery(WITNESS_EXECUTION, WITNESS_STOPPED_AT);
+      return witness ? { proof_status: 'verified', committed_result: committedResult() } : { proof_status: 'refused' };
+    } });
+  const { record: reconcileRecord, result } = await reconcileAccounts({
+    io: { ...harnessed.io, async listArtifacts() { return collected; } },
+    now: NOW, runIdentity, window, environment: {},
+  });
+  assert.equal(result, 'passed');
+  assert.equal(witness.record.operation.execution_name, WITNESS_EXECUTION);
+  assert.equal(witness.source.artifact_name, reconcileArtifact.entry.name);
+  assert.equal(reconcileRecord.identities[0].outcome, 'already_absent');
+  assert.deepEqual(reconcileRecord.unresolved, []);
+});
+
+test('the ordinary teardown passes no witness lookup, and a live reconcile never reads one', async () => {
+  // The reach of tier 3 is the reconcile operation alone: the teardown/job cleanup never supplies
+  // a lookup, so it cannot read another run's artifact to prove its own fresh execution.
+  const teardown = readFileSync(new URL('./cleanup-worker-accounts.mjs', import.meta.url), 'utf8');
+  assert.equal(teardown.includes('createCleanupWitnessLookup'), false);
+  assert.equal(teardown.includes('recovery:'), false);
+  const harnessed = harness({ artifacts: [retainedFixture()], users: [{ email: stable(0), sub: subject(1) }] });
+  const logs = [];
+  const { record } = await reconcileAccounts({
+    io: harnessed.io, now: NOW, runIdentity, window: reconcileWindow(NOW), environment: {}, log: (line) => logs.push(line),
+  });
+  assert.equal(record.identities[0].outcome, 'reconciled');
+  assert.equal(logs.some((line) => line.includes('cleanup record for')), false);
+  // The reconcile supplies the lookup; only an exhausted live proof calls it.
+  assert.equal(typeof harnessed.calls.find((call) => call.service).options.recovery, 'function');
 });
