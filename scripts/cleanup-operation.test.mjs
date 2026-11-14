@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   DirectTeardown,
+  QUARANTINE_REASON_MAX_BYTES,
   RESOURCE_KINDS,
   SCHEMA_DELETE_ORDER,
   deleteRouteFor,
@@ -26,9 +27,23 @@ function fakeTestInfo() {
   return { attempt: 'attempt-' + attemptCounter };
 }
 
+/**
+ * A passing read-back: every routed GET proves absence and the base-photo list
+ * comes back empty. A case that cares about a read states its own result.
+ */
+function defaultRead(url) {
+  if (new URL(url).pathname === '/vto/base-photos') return { status: 200, body: [] };
+  return { status: 404 };
+}
+
 function harness(options = {}) {
   const calls = [];
   const deletes = [];
+  const reads = [];
+  // One ordered record of every request this teardown made, so the
+  // delete -> read-back -> acknowledge order is assertable without wall-clock time.
+  const timeline = [];
+  const pathOf = (url) => new URL(url).pathname;
   const expectedEmail = options.expectedEmail ?? scopedWorkerEmail;
   const teardown = new DirectTeardown({
     runScope: RUN_SCOPE,
@@ -44,6 +59,7 @@ function harness(options = {}) {
     testInfo: options.testInfo ?? fakeTestInfo(),
     io: async (path, init) => {
       calls.push({ path, ...init });
+      timeline.push({ kind: 'machine', path });
       if (path.endsWith('/register')) {
         return options.register ?? { status: 201, body: { operation_id: 'op-1', state_version: 1, phase: 'registered', intent_hash: 'hash', replayed: false } };
       }
@@ -54,10 +70,20 @@ function harness(options = {}) {
     },
     deleteIo: async (url, authorization) => {
       deletes.push({ url, authorization });
-      return options.deleteStatus ? options.deleteStatus(url) : 200;
+      timeline.push({ kind: 'delete', path: pathOf(url) });
+      return options.deleteStatus ? await options.deleteStatus(url) : 200;
+    },
+    // Every read this teardown issues, in order: the routed GETs and the single
+    // base-photo list. An injected `read` decides the answer; the default is the
+    // passing one, so a case that does not care about the read-back stays quiet.
+    readIo: async (url, authorization) => {
+      reads.push({ url, authorization });
+      timeline.push({ kind: 'read', path: pathOf(url) });
+      if (options.read) return await options.read(url);
+      return defaultRead(url);
     },
   });
-  return { teardown, calls, deletes };
+  return { teardown, calls, deletes, reads, timeline };
 }
 
 function attempt(retryIndex, leaseGeneration, payloads, testInfo = fakeTestInfo()) {
@@ -180,25 +206,176 @@ test('malformed resource refs fail closed without changing the captured set', as
   assert.deepEqual(JSON.parse(acknowledge.data).resource_refs, [{ kind: 'wardrobe_item', id: 'item-1' }]);
 });
 
-test('404 is a successful teardown', async () => {
+// Acceptance 1: the acknowledgement is the last machine call, and it is written
+// only after every captured reference was read back. The unified timeline is what
+// proves the order; wall-clock time never enters it.
+test('the acknowledge POST is the last machine call and follows every delete and read-back', async () => {
+  const { teardown, timeline, calls, reads } = harness();
+  await teardown.register();
+  teardown.capture('base_photo', 'photo-1');
+  teardown.capture('wardrobe_item', 'item-1');
+  teardown.capture('outfit_generation', 'gen-1');
+  teardown.capture('outfit', 'outfit-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.equal(result.teardown_result, 'passed');
+
+  // Deletes, then reads, then the single acknowledgement: no interleaving and no
+  // request after the acknowledgement.
+  const stages = timeline.map((entry) => entry.kind);
+  assert.deepEqual(stages, [
+    'machine', 'delete', 'delete', 'delete', 'delete', 'read', 'read', 'read', 'read', 'machine',
+  ]);
+  const acknowledgeAt = timeline.findLastIndex((entry) => entry.kind === 'machine');
+  assert.equal(acknowledgeAt, timeline.length - 1, 'the acknowledgement is the final call');
+  assert.ok(timeline[acknowledgeAt].path.endsWith('/cleanup-operations/acknowledge'));
+  assert.equal(calls.at(-1).path, '/cleanup-operations/acknowledge');
+  const lastReadAt = timeline.findLastIndex((entry) => entry.kind === 'read');
+  const lastDeleteAt = timeline.findLastIndex((entry) => entry.kind === 'delete');
+  assert.ok(lastDeleteAt < timeline.findIndex((entry) => entry.kind === 'read'), 'every delete precedes every read-back');
+  assert.ok(lastReadAt < acknowledgeAt, 'every read-back precedes the acknowledgement');
+
+  // Every captured reference with a read route was read back exactly once, and the
+  // base photo was proven absent through the one list route, never a per-photo GET.
+  assert.deepEqual(reads.map((entry) => new URL(entry.url).pathname), [
+    '/vto/generations/gen-1',
+    '/outfits/outfit-1',
+    '/wardrobe/items/item-1',
+    '/vto/base-photos',
+  ]);
+  assert.equal(reads.filter((entry) => new URL(entry.url).pathname === '/vto/base-photos').length, 1);
+  assert.ok(reads.every((entry) => entry.authorization === 'Bearer token'));
+});
+
+// Acceptance 4: a 404 delete is recorded as already absent, never as a deletion.
+test('a 404 delete with proven absence records already_absent and passes teardown', async () => {
   const { teardown } = harness({ deleteStatus: () => 404 });
   await teardown.register();
   teardown.capture('wardrobe_item', 'item-1');
   const result = await teardown.finalize('passed', 'Bearer token');
+  assert.deepEqual(result.evidence, [{
+    ref: { kind: 'wardrobe_item', id: 'item-1' },
+    delete_status: 404,
+    readback: 'absent',
+    disposition: 'already_absent',
+  }]);
   assert.equal(result.teardown_result, 'passed');
   assert.equal(result.scope_state, 'released');
 });
 
-test('a failing delete partially fails teardown and quarantines without rewriting the product result', async () => {
-  const { teardown, calls } = harness({ deleteStatus: (url) => (url.includes('/outfits/') ? 500 : 200) });
+// Acceptance 4: the 204-and-gone case is `removed`, and it is distinguishable
+// from a 404-and-gone case in the returned evidence.
+test('a 204 delete with proven absence records removed, distinguishably from already_absent', async () => {
+  const { teardown } = harness({ deleteStatus: () => 204 });
+  await teardown.register();
+  teardown.capture('wardrobe_item', 'item-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.deepEqual(result.evidence, [{
+    ref: { kind: 'wardrobe_item', id: 'item-1' },
+    delete_status: 204,
+    readback: 'absent',
+    disposition: 'removed',
+  }]);
+  assert.equal(result.teardown_result, 'passed');
+  assert.equal(result.scope_state, 'released');
+
+  const alreadyAbsent = harness({ deleteStatus: () => 404 });
+  await alreadyAbsent.teardown.register();
+  alreadyAbsent.teardown.capture('wardrobe_item', 'item-1');
+  const alreadyAbsentResult = await alreadyAbsent.teardown.finalize('passed', 'Bearer token');
+  assert.notEqual(alreadyAbsentResult.evidence[0].disposition, result.evidence[0].disposition);
+});
+
+// Acceptance 3: the read-back wins over the delete status.
+test('a 204 delete whose target is still readable is present and quarantines the scope', async () => {
+  const { teardown, calls } = harness({ deleteStatus: () => 204, read: () => ({ status: 200 }) });
+  await teardown.register();
+  teardown.capture('wardrobe_item', 'item-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.equal(result.evidence[0].delete_status, 204);
+  assert.equal(result.evidence[0].readback, 'present');
+  assert.equal(result.evidence[0].disposition, 'present');
+  assert.notEqual(result.teardown_result, 'passed');
+  assert.equal(result.scope_state, 'quarantined');
+  assert.match(result.quarantine_reason, /wardrobe_item:item-1\(present\)/);
+  const acknowledge = calls.at(-1);
+  assert.ok(acknowledge.path.endsWith('/acknowledge'), 'the declaration still closes');
+  assert.equal(JSON.parse(acknowledge.data).scope_state, 'quarantined');
+});
+
+// Acceptance 5: a failed read-back is unverified, never a pass, and the
+// acknowledgement is still sent so the declaration closes.
+test('a read-back that throws is unverified, fails teardown, and still acknowledges', async () => {
+  const { teardown, calls, reads } = harness({ read: () => { throw new Error('read boom'); } });
+  await teardown.register();
+  teardown.capture('wardrobe_item', 'item-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.equal(reads.length, 1, 'no retry: one read per captured reference');
+  assert.equal(result.evidence[0].readback, 'error');
+  assert.equal(result.evidence[0].disposition, 'unverified');
+  assert.match(result.evidence[0].reason, /read boom/);
+  assert.equal(result.teardown_result, 'failed');
+  assert.equal(result.scope_state, 'quarantined');
+  const acknowledge = calls.at(-1);
+  assert.ok(acknowledge.path.endsWith('/acknowledge'), 'the declaration still closes');
+  assert.equal(JSON.parse(acknowledge.data).teardown_result, 'failed');
+});
+
+// The edge table: a 5xx whose target is provably gone passes, and the anomaly
+// stays visible in the evidence. This is a deliberate behaviour change.
+test('a 5xx delete whose target is provably gone records absent_unattributed and passes', async () => {
+  const { teardown } = harness({ deleteStatus: () => 503 });
+  await teardown.register();
+  teardown.capture('outfit_generation', 'gen-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.equal(result.evidence[0].delete_status, 503);
+  assert.equal(result.evidence[0].disposition, 'absent_unattributed');
+  assert.equal(result.teardown_result, 'passed');
+  assert.equal(result.scope_state, 'released');
+});
+
+// The edge table: a 404 whose target is still readable is a contradiction, and
+// the read-back wins.
+test('a 404 delete whose target is still readable is present and fails teardown', async () => {
+  const { teardown } = harness({ deleteStatus: () => 404, read: () => ({ status: 200 }) });
+  await teardown.register();
+  teardown.capture('outfit_generation', 'gen-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.equal(result.evidence[0].delete_status, 404);
+  assert.equal(result.evidence[0].disposition, 'present');
+  assert.notEqual(result.teardown_result, 'passed');
+  assert.equal(result.scope_state, 'quarantined');
+});
+
+// A thrown delete has no status to attribute absence with, so proven absence is
+// unattributed and the thrown message is kept in the evidence.
+test('a thrown delete whose target is provably gone records absent_unattributed and keeps the failure reason', async () => {
+  const { teardown } = harness({ deleteStatus: () => { throw new Error('socket hang up'); } });
+  await teardown.register();
+  teardown.capture('outfit', 'outfit-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.equal(result.evidence[0].delete_status, undefined);
+  assert.equal(result.evidence[0].disposition, 'absent_unattributed');
+  assert.match(result.evidence[0].reason, /delete failed: socket hang up/);
+  assert.equal(result.teardown_result, 'passed');
+});
+
+test('a delete that leaves its target readable partially fails teardown and quarantines without rewriting the product result', async () => {
+  const { teardown, calls } = harness({
+    deleteStatus: (url) => (url.includes('/outfits/') ? 500 : 200),
+    read: (url) => ({ status: url.includes('/outfits/') ? 200 : 404 }),
+  });
   await teardown.register();
   teardown.capture('wardrobe_item', 'item-1');
   teardown.capture('outfit', 'outfit-1');
   const result = await teardown.finalize('passed', 'Bearer token');
+  assert.deepEqual(result.evidence.map((entry) => [entry.ref.kind, entry.disposition]), [
+    ['outfit', 'present'],
+    ['wardrobe_item', 'removed'],
+  ]);
   assert.equal(result.teardown_result, 'partial');
   assert.equal(result.scope_state, 'quarantined');
   assert.equal(result.product_result, 'passed', 'a teardown failure never overwrites the product assertion');
-  assert.ok(result.quarantine_reason && result.quarantine_reason.includes('outfit:outfit-1'));
+  assert.match(result.quarantine_reason, /outfit:outfit-1\(present\)/);
   const acknowledge = calls.at(-1);
   assert.ok(acknowledge);
   const body = JSON.parse(acknowledge.data ?? '{}');
@@ -207,35 +384,44 @@ test('a failing delete partially fails teardown and quarantines without rewritin
   assert.equal(body.scope_state, 'quarantined');
 });
 
-test('every delete failing reports failed teardown and keeps the product result', async () => {
-  const { teardown } = harness({ deleteStatus: () => 500 });
+test('every delete failing while the target stays readable reports failed teardown and keeps the product result', async () => {
+  const { teardown } = harness({ deleteStatus: () => 500, read: () => ({ status: 200 }) });
   await teardown.register();
   teardown.capture('wardrobe_item', 'item-1');
   const result = await teardown.finalize('failed', 'Bearer token');
+  assert.equal(result.evidence[0].disposition, 'present');
   assert.equal(result.teardown_result, 'failed');
   assert.equal(result.scope_state, 'quarantined');
   assert.equal(result.product_result, 'failed');
 });
 
-test('a captured ref with no ordinary user delete route quarantines instead of being skipped', async () => {
-  const { teardown, deletes } = harness();
+test('a captured ref with no ordinary user delete route quarantines as unverified instead of being skipped', async () => {
+  const { teardown, deletes, reads } = harness();
   await teardown.register();
   teardown.capture('object_key', 'uploads/key.png');
   const result = await teardown.finalize('passed', 'Bearer token');
   assert.equal(deletes.length, 0);
+  assert.equal(reads.length, 0, 'no read route exists, so no request is made');
+  assert.deepEqual(result.evidence, [{
+    ref: { kind: 'object_key', id: 'uploads/key.png' },
+    readback: 'error',
+    disposition: 'unverified',
+    reason: 'no ordinary user-facing read route',
+  }]);
   assert.equal(result.teardown_result, 'failed');
   assert.equal(result.scope_state, 'quarantined');
 });
 
-test('finalize is idempotent per attempt and deletes each ref only once', async () => {
-  const { teardown, deletes, calls } = harness();
+test('finalize is idempotent per attempt and deletes and reads each ref only once', async () => {
+  const { teardown, deletes, reads, calls } = harness();
   await teardown.register();
   teardown.capture('wardrobe_item', 'item-1');
   const first = await teardown.finalize('passed', 'Bearer token');
-  const afterFirst = { deletes: deletes.length, calls: calls.length };
+  const afterFirst = { deletes: deletes.length, reads: reads.length, calls: calls.length };
   const second = await teardown.finalize('passed', 'Bearer token');
   assert.equal(second.teardown_result, first.teardown_result);
   assert.equal(deletes.length, afterFirst.deletes);
+  assert.equal(reads.length, afterFirst.reads);
   assert.equal(calls.length, afterFirst.calls);
 });
 
@@ -285,7 +471,11 @@ test('finalize closes the declaration with the teardown outcome it recorded', as
   });
 
   const partialInfo = fakeTestInfo();
-  const partial = harness({ testInfo: partialInfo, deleteStatus: (url) => (url.includes('/outfits/') ? 500 : 200) });
+  const partial = harness({
+    testInfo: partialInfo,
+    deleteStatus: (url) => (url.includes('/outfits/') ? 500 : 200),
+    read: (url) => ({ status: url.includes('/outfits/') ? 200 : 404 }),
+  });
   await partial.teardown.register();
   partial.teardown.capture('wardrobe_item', 'item-1');
   partial.teardown.capture('outfit', 'outfit-1');
@@ -294,10 +484,11 @@ test('finalize closes the declaration with the teardown outcome it recorded', as
   const partialDeclaration = readAttemptBusinessCleanup(partialInfo);
   assert.equal(partialDeclaration.state, 'closed');
   assert.equal(partialDeclaration.teardownResult, 'partial');
-  assert.match(partialDeclaration.reason, /^teardown partial; undeleted outfit:outfit-1$/);
+  assert.match(partialDeclaration.reason, /^teardown partial; references 2: /);
+  assert.match(partialDeclaration.reason, /outfit:outfit-1\(present\)$/);
 
   const failedInfo = fakeTestInfo();
-  const failed = harness({ testInfo: failedInfo, deleteStatus: () => 500 });
+  const failed = harness({ testInfo: failedInfo, deleteStatus: () => 500, read: () => ({ status: 200 }) });
   await failed.teardown.register();
   failed.teardown.capture('wardrobe_item', 'item-1');
   const failedResult = await failed.teardown.finalize('failed', 'Bearer token');
@@ -307,15 +498,57 @@ test('finalize closes the declaration with the teardown outcome it recorded', as
   assert.equal(failedDeclaration.teardownResult, 'failed');
 });
 
-test('the direct acknowledgement path closes the declaration too', async () => {
+// Acceptance 6: an attempt that captured nothing still acknowledges `passed`, and
+// issues no read-back request at all. This is the zero-capture terminal path.
+test('the zero-captured-reference finalize acknowledges passed with no read-back request', async () => {
   const testInfo = fakeTestInfo();
-  const { teardown } = harness({ testInfo });
+  const { teardown, calls, deletes, reads } = harness({ testInfo });
   await teardown.register();
-  await teardown.acknowledge('skipped', 'passed');
+  const result = await teardown.finalize('skipped', 'Bearer token');
+  assert.deepEqual(result.evidence, []);
+  assert.equal(result.teardown_result, 'passed');
+  assert.equal(result.scope_state, 'released');
+  assert.equal(deletes.length, 0);
+  assert.equal(reads.length, 0);
+  const acknowledge = calls.at(-1);
+  assert.ok(acknowledge.path.endsWith('/acknowledge'));
+  assert.deepEqual(JSON.parse(acknowledge.data).resource_refs, []);
+  assert.equal(JSON.parse(acknowledge.data).teardown_result, 'passed');
   assert.deepEqual(readAttemptBusinessCleanup(testInfo), {
     email: scopedWorkerEmail,
     state: 'closed',
     teardownResult: 'passed',
+  });
+});
+
+// Acceptance 7: captured references with no bearer token make no request, but the
+// declaration still closes as failed and quarantined. It used to pass silently.
+test('captured references without a bearer token acknowledge failed and make no request', async () => {
+  const testInfo = fakeTestInfo();
+  const { teardown, calls, deletes, reads } = harness({ testInfo });
+  await teardown.register();
+  teardown.capture('wardrobe_item', 'item-1');
+  teardown.capture('outfit', 'outfit-1');
+  const result = await teardown.finalize('passed');
+  assert.equal(result.teardown_result, 'failed');
+  assert.equal(result.scope_state, 'quarantined');
+  assert.equal(result.quarantine_reason, 'no_authorization');
+  assert.equal(deletes.length, 0);
+  assert.equal(reads.length, 0);
+  assert.deepEqual(result.evidence.map((entry) => [entry.ref.kind, entry.disposition, entry.reason]), [
+    ['outfit', 'unverified', 'no_authorization'],
+    ['wardrobe_item', 'unverified', 'no_authorization'],
+  ]);
+  const acknowledge = calls.at(-1);
+  const body = JSON.parse(acknowledge.data);
+  assert.equal(body.teardown_result, 'failed');
+  assert.equal(body.scope_state, 'quarantined');
+  assert.equal(body.quarantine_reason, 'no_authorization');
+  assert.deepEqual(readAttemptBusinessCleanup(testInfo), {
+    email: scopedWorkerEmail,
+    state: 'closed',
+    teardownResult: 'failed',
+    reason: 'no_authorization',
   });
 });
 
@@ -354,10 +587,16 @@ test('the declaration key is the attempt, not the leased address', async () => {
   });
 });
 
-test('an unregistered operation is never acknowledged', async () => {
-  const { teardown, calls } = harness();
-  await assert.rejects(() => teardown.acknowledge('passed', 'passed'), /registered before this step/);
+test('an unregistered operation is never acknowledged and makes no request', async () => {
+  // `finalize` is the only terminal entry point now, so it is also the only place
+  // that can reach the acknowledgement. The registration check runs before the
+  // first delete or read, so an unregistered attempt fails closed with no call.
+  const { teardown, calls, deletes, reads } = harness();
+  teardown.capture('wardrobe_item', 'item-1');
+  await assert.rejects(() => teardown.finalize('passed', 'Bearer token'), /registered before this step/);
   assert.equal(calls.length, 0);
+  assert.equal(deletes.length, 0);
+  assert.equal(reads.length, 0);
 });
 
 test('delete routes match the existing user-facing Service surface', () => {
@@ -475,7 +714,7 @@ test('the deletion order is the schema contract, not the capture order', async (
   ]);
 });
 
-test('a capture the order cannot release fails closed and names the undeleted resource', async () => {
+test('a capture the order cannot release fails closed and names the unproven resource', async () => {
   const kindOf = { '/vto/generations/': 'outfit_generation', '/outfits/': 'outfit',
     '/wardrobe/items/': 'wardrobe_item', '/vto/base-photos/': 'base_photo' };
   const kindAt = (pathname) => kindOf[pathname.slice(0, pathname.lastIndexOf('/') + 1)];
@@ -484,19 +723,31 @@ test('a capture the order cannot release fails closed and names the undeleted re
   // at all, because the generation is gone before its outfit is deleted.
   const refuses = (liveRows, referenced) => SCHEMA_EDGES.some(([referencing, target, action]) => (
     target === referenced && action === 'no action' && liveRows.has(standsFor(referencing))));
+  // The read-back reads the same simulated store the deletes mutate, and the base
+  // photo is proven through the one list route rather than a per-photo GET.
+  const readOf = (liveRows, basePhotoIds) => (url) => {
+    const pathname = new URL(url).pathname;
+    if (pathname === '/vto/base-photos') {
+      return { status: 200, body: liveRows.has('base_photo') ? basePhotoIds.map((id) => ({ id })) : [] };
+    }
+    return { status: liveRows.has(kindAt(pathname)) ? 200 : 404 };
+  };
 
   // The order releases every reference: with the whole capture present each
   // delete is accepted, one at a time. The generation is deletable because
   // nothing references it, which is what frees its outfit; the outfit delete
-  // then cascade-releases the garment it held.
+  // then cascade-releases the garment it held. Nothing is left to read back.
   const live = new Set(['outfit_generation', 'outfit', 'wardrobe_item', 'base_photo']);
-  const { teardown, deletes } = harness({ deleteStatus: async (url) => {
-    const kind = kindAt(new URL(url).pathname);
-    const refusedDelete = refuses(live, kind);
-    if (kind === 'outfit') live.delete('wardrobe_item');
-    live.delete(kind);
-    return refusedDelete ? 503 : 204;
-  } });
+  const { teardown, deletes } = harness({
+    deleteStatus: async (url) => {
+      const kind = kindAt(new URL(url).pathname);
+      const refusedDelete = refuses(live, kind);
+      if (kind === 'outfit') live.delete('wardrobe_item');
+      if (!refusedDelete) live.delete(kind);
+      return refusedDelete ? 503 : 204;
+    },
+    read: readOf(live, ['photo-1']),
+  });
   await teardown.register();
   teardown.capture('outfit', 'outfit-1');
   teardown.capture('outfit_generation', 'gen-1');
@@ -507,29 +758,113 @@ test('a capture the order cannot release fails closed and names the undeleted re
     '/outfits/outfit-1',
     '/vto/base-photos/photo-1',
   ]);
+  assert.deepEqual(complete.evidence.map((entry) => entry.disposition), ['removed', 'removed', 'removed']);
   assert.equal(complete.teardown_result, 'passed');
   assert.equal(complete.scope_state, 'released');
   assert.equal(quarantinesScope(complete.teardown_result), false);
 
   // A genuinely incomplete capture, the shape this issue fixes: the generation's
-  // outfit was never captured, so its delete is refused, and the surviving
-  // generation then refuses the base photo it references. The gate quarantines.
-  const incomplete = harness({ deleteStatus: async (url) => {
-    const kind = kindAt(new URL(url).pathname);
-    const surviving = new Set(['outfit_generation', 'base_photo']);
-    return refuses(surviving, kind) ? 503 : 204;
-  } });
+  // delete is refused, so the surviving generation keeps refusing the base photo
+  // it references. Neither row leaves the store, the read-back finds both still
+  // readable, and the gate quarantines naming the unproven references.
+  const surviving = new Set(['outfit_generation', 'base_photo']);
+  const incomplete = harness({
+    deleteStatus: async (url) => {
+      const kind = kindAt(new URL(url).pathname);
+      return kind === 'outfit_generation' || refuses(surviving, kind) ? 503 : 204;
+    },
+    read: readOf(surviving, ['photo-1']),
+  });
   await incomplete.teardown.register();
   incomplete.teardown.capture('outfit_generation', 'gen-1');
   incomplete.teardown.capture('base_photo', 'photo-1');
   const refused = await incomplete.teardown.finalize('passed', 'Bearer token');
-  assert.equal(refused.teardown_result, 'partial');
+  assert.deepEqual(refused.evidence.map((entry) => entry.disposition), ['present', 'present']);
+  assert.equal(refused.teardown_result, 'failed');
   assert.equal(refused.scope_state, 'quarantined');
   assert.equal(quarantinesScope(refused.teardown_result), true);
-  assert.match(refused.quarantine_reason, /base_photo:photo-1/);
+  assert.match(refused.quarantine_reason, /outfit_generation:gen-1\(present\)/);
+  assert.match(refused.quarantine_reason, /base_photo:photo-1\(present\)/);
   const acknowledge = incomplete.calls.at(-1);
   assert.ok(acknowledge);
   assert.equal(JSON.parse(acknowledge.data).scope_state, 'quarantined');
+});
+
+// Base photos have no single-resource GET, so all captured base photos are proven
+// through exactly one list read per attempt — never a per-photo routed GET.
+test('two captured base photos are proven absent through exactly one base-photo list read', async () => {
+  const { teardown, reads } = harness({ deleteStatus: () => 204, read: () => ({ status: 200, body: [] }) });
+  await teardown.register();
+  teardown.capture('base_photo', 'photo-1');
+  teardown.capture('base_photo', 'photo-2');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.deepEqual(reads.map((entry) => new URL(entry.url).pathname), ['/vto/base-photos']);
+  assert.deepEqual(result.evidence.map((entry) => entry.disposition), ['removed', 'removed']);
+  assert.equal(result.teardown_result, 'passed');
+});
+
+test('a captured base photo still in the list is present and withholds a pass', async () => {
+  const { teardown, reads } = harness({
+    deleteStatus: () => 204,
+    read: () => ({ status: 200, body: [{ id: 'photo-2' }] }),
+  });
+  await teardown.register();
+  teardown.capture('base_photo', 'photo-1');
+  teardown.capture('base_photo', 'photo-2');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.equal(reads.length, 1, 'one list read covers every captured base photo');
+  assert.deepEqual(result.evidence.map((entry) => [entry.ref.id, entry.disposition]), [
+    ['photo-1', 'removed'],
+    ['photo-2', 'present'],
+  ]);
+  assert.equal(result.teardown_result, 'partial');
+  assert.equal(result.scope_state, 'quarantined');
+  assert.match(result.quarantine_reason, /base_photo:photo-2\(present\)/);
+});
+
+test('a failed or thrown base-photo list marks every captured base photo unverified', async () => {
+  for (const read of [
+    () => ({ status: 503 }),
+    () => { throw new Error('list timed out'); },
+  ]) {
+    const { teardown, reads } = harness({ deleteStatus: () => 204, read });
+    await teardown.register();
+    teardown.capture('base_photo', 'photo-1');
+    teardown.capture('base_photo', 'photo-2');
+    const result = await teardown.finalize('passed', 'Bearer token');
+    assert.equal(reads.length, 1, 'one failing list read is not retried');
+    assert.deepEqual(result.evidence.map((entry) => entry.disposition), ['unverified', 'unverified']);
+    assert.equal(result.teardown_result, 'failed');
+    assert.equal(result.scope_state, 'quarantined');
+  }
+});
+
+// The Service's acknowledgement route caps quarantine_reason at 512 characters and
+// its schema is strict, so the budget is built here and never overruns.
+test('a many-reference quarantine reason stays inside 512 UTF-8 bytes and is deterministic', async () => {
+  const capture = (teardown) => {
+    for (let index = 0; index < 40; index += 1) {
+      teardown.capture('wardrobe_item', 'item-' + String(index).padStart(2, '0') + '-0f8f8f8f-8f8f-4f8f-8f8f-8f8f8f8f8f8f');
+    }
+  };
+  const run = async () => {
+    const { teardown, calls } = harness({ deleteStatus: () => 204, read: () => ({ status: 200 }) });
+    await teardown.register();
+    capture(teardown);
+    const result = await teardown.finalize('passed', 'Bearer token');
+    return { result, acknowledge: calls.at(-1) };
+  };
+  const first = await run();
+  const second = await run();
+  assert.equal(first.result.teardown_result, 'failed');
+  assert.ok(first.result.quarantine_reason);
+  assert.ok(Buffer.byteLength(first.result.quarantine_reason, 'utf8') <= QUARANTINE_REASON_MAX_BYTES,
+    'the reason fits the Service route budget');
+  assert.match(first.result.quarantine_reason, /; \+\d+ more$/);
+  assert.equal(second.result.quarantine_reason, first.result.quarantine_reason,
+    'the same input builds the same reason');
+  assert.equal(JSON.parse(first.acknowledge.data).quarantine_reason, first.result.quarantine_reason,
+    'the acknowledgement carries exactly the bounded reason');
 });
 
 test('machine auth refuses to sign without its secret', () => {

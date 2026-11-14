@@ -6,7 +6,6 @@ import { requireEnvironment } from './support/account.js';
 import { CLIENT_VERSION_HEADERS } from './support/client-version.js';
 import {
   DirectTeardown,
-  deleteRouteFor,
   quarantinesScope,
   type ProductResult,
   type ResourceRef,
@@ -111,43 +110,21 @@ test.describe('Virtual try-on @regression @full-stack', () => {
     await teardown.bindOwner(workerAccount.subject);
   });
 
-  test.afterEach(async ({ page }, testInfo) => {
+  // Playwright requires the first hook argument to destructure fixtures. This
+  // teardown needs none now that the absence read-back lives inside `finalize`.
+  // eslint-disable-next-line no-empty-pattern -- Playwright requires the object destructuring pattern.
+  test.afterEach(async ({}, testInfo) => {
     if (!teardown) return;
     // A failed product assertion is reported as `failed`; an unrun body is `skipped`.
     if (productResult === 'skipped') {
       productResult = testInfo.status === testInfo.expectedStatus ? 'skipped' : 'failed';
     }
-    if (!captured.length || !authorization) {
-      // Nothing was created — or nothing could be released without the attempt's own
-      // authorization — so the attempt still acknowledges its own scope.
-      await teardown.acknowledge(productResult, 'passed');
-      return;
-    }
     for (const { kind, id } of captured) teardown.capture(kind, id);
+    // `finalize` is the only terminal entry point: it deletes the captured refs in
+    // schema order, reads every one of them back, and only then writes the single
+    // acknowledgement. It also closes the declaration when nothing was captured or
+    // when this attempt holds no bearer token, so there is no second call site.
     const result = await teardown.finalize(productResult, authorization);
-
-    // Exact absence readback after teardown, independent of the product assertion:
-    // `wardrobe_item`, `outfit` and `outfit_generation` have a routed single-resource GET.
-    // A base photo has none, so its absence is proven by the exact captured id being
-    // absent from the authenticated list route.
-    const basePhotoIds = captured.filter(({ kind }) => kind === 'base_photo').map(({ id }) => id);
-    for (const { kind, id } of captured) {
-      if (kind === 'base_photo') continue;
-      const route = deleteRouteFor({ kind, id });
-      if (!route) throw new Error(`No ordinary user-facing absence readback exists for ${kind}`);
-      const readback = await page.request.get(`${requireEnvironment('E2E_SERVICE_URL')}${route}`, {
-        headers: { ...CLIENT_VERSION_HEADERS, Authorization: authorization },
-      });
-      expect(readback.status()).toBe(404);
-    }
-    if (basePhotoIds.length) {
-      const listed = await page.request.get(`${requireEnvironment('E2E_SERVICE_URL')}/vto/base-photos`, {
-        headers: { ...CLIENT_VERSION_HEADERS, Authorization: authorization },
-      });
-      expect(listed.status()).toBe(200);
-      const remaining = (await listed.json() as { id: string }[]).map(photo => photo.id);
-      for (const id of basePhotoIds) expect(remaining).not.toContain(id);
-    }
 
     // A teardown failure fails the separate teardown gate without rewriting the product
     // outcome, and quarantines the scope so the next attempt is fresh.

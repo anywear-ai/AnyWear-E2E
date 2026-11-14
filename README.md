@@ -463,7 +463,9 @@ The Infra-owned versioned Step Functions cleanup capability invokes Service's fi
 application-data task. The ordinary qualification cleanup and the `reconcile` operation
 submit the same strict normal-mode envelope and enter the same resume/verify/
 retry rule. The Service cleanup deletes the captured users' objects under
-`wearable-items/<sub>/` and `base-photos/<sub>/`, reads absence back by listing, and only then
+`wearable-items/<sub>/`, `base-photos/<sub>/` and `outfit-generations/<sub>/`, plus the
+`task-attempts/vto/<vto_id>/` staging objects of their captured generations, reads absence
+back by listing, and only then
 deletes their PostgreSQL rows; it reports `objects` and `objectsMissing` in its committed result; `reconcile` requires both counters before it
 deletes an identity, so a Service release that cannot prove the object phase leaves the
 identity retained. A retained record whose captured subject and worker-family address (a stable

@@ -170,5 +170,7 @@ Run install and build commands from this repository.
 - Never delete, or list for deletion, by scope label, prefix or address alone. The only
   deletion selectors are a manifest's captured `{sub, email}` and the Service cleanup's own
   exact-reference request; the object phase deletes only a captured subject's
-  `wearable-items/<sub>/` and `base-photos/<sub>/` objects. A creation by a principal other
+  `wearable-items/<sub>/`, `base-photos/<sub>/` and `outfit-generations/<sub>/` objects,
+  plus the `task-attempts/vto/<vto_id>/` staging objects of that subject's captured
+  generations and `vto` task resource ids. A creation by a principal other
   than the E2E qualification role is reported and never deleted.
