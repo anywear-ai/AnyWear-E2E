@@ -105,8 +105,10 @@ older record was written.
    (`{runScope, users:[{sub,email}]}`, at most eight users), grouped by the captured run scope;
    a creation-only identity derives its scope from the run its session names. The scope is an
    operation/idempotency name and never a selector — the exact users select the rows and
-   objects. The Service deletes the captured users' objects under `wearable-items/<sub>/` and
-   `base-photos/<sub>/`, reads absence back by listing, and only then deletes their rows; it
+   objects. The Service deletes the captured users' objects under `wearable-items/<sub>/`,
+   `base-photos/<sub>/` and `outfit-generations/<sub>/`, plus the `task-attempts/vto/<vto_id>/`
+   staging objects of their captured generations, reads absence back by listing, and only then
+   deletes their rows; it
    commits `objects` and `objectsMissing`. Both counters are required: a Service release without
    them cannot prove the object phase, and the identity is recorded as a Service refusal and
    retained rather than reported clean.

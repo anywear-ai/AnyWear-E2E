@@ -88,7 +88,7 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
     });
     await teardown.register();
     // Obtain the real Client's bearer header without persisting a token or browser
-    // state. The readback and the teardown deletes reuse it.
+    // state. The readback and the teardown deletes inside `finalize` reuse it.
     const authorized = page.waitForRequest(request => new URL(request.url()).pathname === '/users/me'
       && request.headers().authorization !== undefined);
     await login(page, workerAccount);
@@ -98,29 +98,21 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
     await teardown.bindOwner(workerAccount.subject);
   });
 
-  test.afterEach(async ({ page }, testInfo) => {
+  // Playwright requires the first hook argument to destructure fixtures. This
+  // teardown needs none now that the absence read-back lives inside `finalize`.
+  // eslint-disable-next-line no-empty-pattern -- Playwright requires the object destructuring pattern.
+  test.afterEach(async ({}, testInfo) => {
     if (!teardown) return;
     // A failed product assertion is reported as `failed`; an unrun body is `skipped`.
     if (productResult === 'skipped') {
       productResult = testInfo.status === testInfo.expectedStatus ? 'skipped' : 'failed';
     }
-    if (createdItemIds.length === 0 || !authorization) {
-      // Nothing was created, so the attempt still acknowledges its own scope.
-      await teardown.acknowledge(productResult, 'passed');
-      return;
-    }
     for (const id of createdItemIds) teardown.capture('wardrobe_item', id);
+    // `finalize` is the only terminal entry point: it deletes the captured items in
+    // schema order, reads every one of them back, and only then writes the single
+    // acknowledgement. It also closes the declaration when nothing was created or
+    // when this attempt holds no bearer token, so there is no second call site.
     const result = await teardown.finalize(productResult, authorization);
-
-    // Exact absence readback after teardown for every captured item, independent
-    // of the product assertion.
-    for (const id of createdItemIds) {
-      const readback = await page.request.get(
-        `${requireEnvironment('E2E_SERVICE_URL')}/wardrobe/items/${id}`,
-        { headers: { ...CLIENT_VERSION_HEADERS, Authorization: authorization } },
-      );
-      expect(readback.status()).toBe(404);
-    }
 
     // A teardown failure fails the separate teardown gate without rewriting the
     // product outcome, and quarantines the scope so the next attempt is fresh.
