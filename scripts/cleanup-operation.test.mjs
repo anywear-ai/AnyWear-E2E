@@ -285,6 +285,23 @@ test('a 204 delete with proven absence records removed, distinguishably from alr
   assert.notEqual(alreadyAbsentResult.evidence[0].disposition, result.evidence[0].disposition);
 });
 
+// Acceptance 4: the 200-and-gone case is the other status that credits the
+// absence to this attempt, so it records the same `removed` disposition.
+test('a 200 delete with proven absence records removed and releases the scope', async () => {
+  const { teardown } = harness({ deleteStatus: () => 200 });
+  await teardown.register();
+  teardown.capture('wardrobe_item', 'item-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.deepEqual(result.evidence, [{
+    ref: { kind: 'wardrobe_item', id: 'item-1' },
+    delete_status: 200,
+    readback: 'absent',
+    disposition: 'removed',
+  }]);
+  assert.equal(result.teardown_result, 'passed');
+  assert.equal(result.scope_state, 'released');
+});
+
 // Acceptance 3: the read-back wins over the delete status.
 test('a 204 delete whose target is still readable is present and quarantines the scope', async () => {
   const { teardown, calls } = harness({ deleteStatus: () => 204, read: () => ({ status: 200 }) });
@@ -292,6 +309,24 @@ test('a 204 delete whose target is still readable is present and quarantines the
   teardown.capture('wardrobe_item', 'item-1');
   const result = await teardown.finalize('passed', 'Bearer token');
   assert.equal(result.evidence[0].delete_status, 204);
+  assert.equal(result.evidence[0].readback, 'present');
+  assert.equal(result.evidence[0].disposition, 'present');
+  assert.notEqual(result.teardown_result, 'passed');
+  assert.equal(result.scope_state, 'quarantined');
+  assert.match(result.quarantine_reason, /wardrobe_item:item-1\(present\)/);
+  const acknowledge = calls.at(-1);
+  assert.ok(acknowledge.path.endsWith('/acknowledge'), 'the declaration still closes');
+  assert.equal(JSON.parse(acknowledge.data).scope_state, 'quarantined');
+});
+
+// The read-back wins for a 200 as well: a still-readable target is present and
+// the scope is quarantined whatever its delete returned.
+test('a 200 delete whose target is still readable is present and quarantines the scope', async () => {
+  const { teardown, calls } = harness({ deleteStatus: () => 200, read: () => ({ status: 200 }) });
+  await teardown.register();
+  teardown.capture('wardrobe_item', 'item-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.equal(result.evidence[0].delete_status, 200);
   assert.equal(result.evidence[0].readback, 'present');
   assert.equal(result.evidence[0].disposition, 'present');
   assert.notEqual(result.teardown_result, 'passed');
@@ -328,6 +363,19 @@ test('a 5xx delete whose target is provably gone records absent_unattributed and
   teardown.capture('outfit_generation', 'gen-1');
   const result = await teardown.finalize('passed', 'Bearer token');
   assert.equal(result.evidence[0].delete_status, 503);
+  assert.equal(result.evidence[0].disposition, 'absent_unattributed');
+  assert.equal(result.teardown_result, 'passed');
+  assert.equal(result.scope_state, 'released');
+});
+
+// The edge table: a success status outside the 200/204 pair credits nothing, so
+// proven absence stays unattributed even though the teardown passes.
+test('a 201 delete whose target is provably gone records absent_unattributed and passes', async () => {
+  const { teardown } = harness({ deleteStatus: () => 201 });
+  await teardown.register();
+  teardown.capture('outfit_generation', 'gen-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+  assert.equal(result.evidence[0].delete_status, 201);
   assert.equal(result.evidence[0].disposition, 'absent_unattributed');
   assert.equal(result.teardown_result, 'passed');
   assert.equal(result.scope_state, 'released');
@@ -406,7 +454,7 @@ test('a captured ref with no ordinary user delete route quarantines as unverifie
     ref: { kind: 'object_key', id: 'uploads/key.png' },
     readback: 'error',
     disposition: 'unverified',
-    reason: 'no ordinary user-facing read route',
+    reason: 'no ordinary user-facing delete route and no ordinary user-facing read route',
   }]);
   assert.equal(result.teardown_result, 'failed');
   assert.equal(result.scope_state, 'quarantined');

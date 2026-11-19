@@ -219,10 +219,10 @@ export type ReferenceReadback = 'absent' | 'present' | 'error';
  * What the teardown can honestly say about one captured reference.
  *
  * Absence decides this, never the delete status. `removed` and `already_absent`
- * both mean the read-back proved the reference gone; the delete status only
- * attributes that absence to this attempt (`2xx`) or to an earlier state (`404`).
- * `absent_unattributed` is proven absence that no delete outcome explains (a
- * `5xx`, a thrown request, or no status at all). A reference that is still
+ * both mean the read-back proved the reference gone. Exactly `200` and `204`
+ * attribute that absence to this attempt; `404` keeps the earlier state
+ * (`already_absent`). `absent_unattributed` is the fall-through for any other
+ * status, a thrown request, or no status at all. A reference that is still
  * readable is `present` whatever its delete returned, and one whose absence
  * could not be proven is `unverified`.
  */
@@ -583,7 +583,7 @@ export class DirectTeardown {
       if (!route) {
         // `object_key`: neither route exists, so nothing can be proven. Unchanged
         // fail-closed, and deliberately no request of either kind.
-        evidence.push({ ref: record.ref, readback: 'error', disposition: 'unverified', reason: 'no ordinary user-facing read route' });
+        evidence.push({ ref: record.ref, readback: 'error', disposition: 'unverified', reason: 'no ordinary user-facing delete route and no ordinary user-facing read route' });
         continue;
       }
       let readback: ReferenceReadback;
