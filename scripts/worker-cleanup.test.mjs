@@ -595,3 +595,63 @@ test('the teardown uses the subject-guarded retention and still fails the step',
   assert.doesNotMatch(source, /Deferred exact E2E worker cleanup/);
   assert.doesNotMatch(source, /cleanup deferred/);
 });
+
+test('a failure before the Service cleanup is requested is retained with that reason, not as a refusal', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'issue-287-pre-call-'));
+  const budgetPath = path.join(directory, 'account-budget.json');
+  const evidencePath = path.join(directory, 'service-cleanup-operation.json');
+  const saved = LEDGER_ENVIRONMENT.map(name => [name, process.env[name]]);
+  try {
+    process.env.E2E_ACCOUNT_BUDGET_PATH = budgetPath;
+    process.env.E2E_ACCOUNT_RUN_SCOPE = runScope;
+    process.env.E2E_WORKERS = '1';
+    process.env.E2E_MAX_ACTIVE_ACCOUNTS = '1';
+    process.env.E2E_MAX_NEW_ACCOUNTS_PER_RUN = '2';
+    await writeFile(budgetPath, `${JSON.stringify(ledgerDocument([ledgerRecord()]), null, 2)}\n`);
+
+    // A manifest the cleanup request refuses to be built from: the failure happens inside
+    // `createServiceCleanupInputs`, before the Service cleanup is invoked at all. The identity is
+    // still retained — the safe state — but the reason must not claim a Service refusal.
+    const unbuildable = { ...manifest([ledgerRecord()]), version: 2 };
+    const transport = cleanupTransport();
+    const error = await runCapturedWorkerCleanup(
+      unbuildable,
+      cleanupEnvironment(evidencePath),
+      cleanupIo(),
+      { operation: (inputs, environment, _io, options) => runCleanupOperation(inputs, environment, transport, options),
+        capabilityIo: capabilityIo(7) },
+    ).then(() => assert.fail('an unbuildable manifest must fail the step'), thrown => thrown);
+
+    assert.equal(error.name, 'WorkerCleanupRetention');
+    const ledger = JSON.parse(await readFile(budgetPath, 'utf8'));
+    assert.equal(ledger.accounts[0].status, 'retained');
+    assert.match(ledger.accounts[0].retainedReason, /^service cleanup not requested;/);
+    assert.doesNotMatch(ledger.accounts[0].retainedReason, /service cleanup refused/);
+    assert.match(ledger.accounts[0].retainedReason, /valid bounded account manifest/);
+    assert.equal(ledger.accounts[0].reconcileBy, '2026-10-17T05:03:56.709Z');
+    // Nothing reached the Service or the capability, so no cleanup evidence exists.
+    assert.equal(transport.calls.length, 0);
+    await assert.rejects(readFile(evidencePath), (readError) => readError.code === 'ENOENT');
+    assert.deepEqual(error.notCreated, []);
+
+    // The same step with a Service refusal still says so: the two causes stay distinguishable.
+    await writeFile(budgetPath, `${JSON.stringify(ledgerDocument([ledgerRecord()]), null, 2)}\n`);
+    const refusing = cleanupTransport({ startError: Object.assign(new Error('AccessDeniedException'), { name: 'AccessDeniedException' }) });
+    const refused = await runCapturedWorkerCleanup(
+      manifest([ledgerRecord()]),
+      cleanupEnvironment(evidencePath),
+      cleanupIo(),
+      { operation: (inputs, environment, _io, options) => runCleanupOperation(inputs, environment, refusing, options),
+        capabilityIo: capabilityIo(7) },
+    ).then(() => assert.fail('a refused cleanup must fail the step'), thrown => thrown);
+    assert.equal(refused.name, 'WorkerCleanupRetention');
+    const refusedLedger = JSON.parse(await readFile(budgetPath, 'utf8'));
+    assert.match(refusedLedger.accounts[0].retainedReason, /^service cleanup refused;/);
+    assert.equal(refusing.calls.some(call => call.start), true, 'the refusing case did reach the Service start');
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});

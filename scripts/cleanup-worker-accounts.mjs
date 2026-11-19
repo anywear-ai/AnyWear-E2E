@@ -67,21 +67,25 @@ export function notCreatedWorkerAccounts(manifest) {
 }
 
 /**
- * The refusal a retention names (#287).
+ * The failure a retention names (#287).
  *
  * The operation throws one generic failure message and keeps the reason in its evidence, so the
  * cause chain is what names the refusal: the transport's typed refusal, the start guard's
- * `CleanupCapabilityRefusal`, or the Service error underneath. The result is sanitized and
+ * `CleanupCapabilityRefusal`, or the Service error underneath. `serviceCleanupRequested` says
+ * whether the failure happened after the cleanup was requested, so a reader can tell a Service
+ * refusal from a failure that never reached the Service (a manifest the request could not be
+ * built from, for example) — the identity is retained either way. The result is sanitized and
  * bounded like every other retention reason.
  */
-export function retentionReason(error) {
+export function retentionReason(error, { serviceCleanupRequested = true } = {}) {
   const parts = [];
   for (let current = error, depth = 0; current !== undefined && current !== null && depth < 4; depth += 1) {
     if (current instanceof Error) parts.push(`${current.name}: ${current.message}`);
     else parts.push(String(current));
     current = current.cause;
   }
-  return `service cleanup refused; ${parts.join(' <- ')}`.replace(/\s+/g, ' ').trim().slice(0, MAX_REASON_LENGTH);
+  const failure = serviceCleanupRequested ? 'service cleanup refused' : 'service cleanup not requested';
+  return `${failure}; ${parts.join(' <- ')}`.replace(/\s+/g, ' ').trim().slice(0, MAX_REASON_LENGTH);
 }
 
 /**
@@ -115,8 +119,10 @@ export async function runCapturedWorkerCleanup(manifest, environment, io, {
   operation = runCleanupOperation, capabilityIo,
 } = {}) {
   const beforeStart = cleanupStartGuard({ environment, io: capabilityIo });
+  let requested = false;
   try {
     return await cleanupWorkerAccounts(manifest, { ...io, runServiceCleanup: async inputs => {
+      requested = true;
       const result = await operation(inputs, environment, undefined, { beforeStart });
       if (result?.operation?.proof_status !== 'verified') {
         throw new Error('Service cleanup did not prove the committed result; identities retained');
@@ -125,8 +131,11 @@ export async function runCapturedWorkerCleanup(manifest, environment, io, {
     } });
   } catch (error) {
     // A refused teardown is a retention, not a deferral (#287): record every captured identity
-    // it attempted before the step fails, so the reconcile operation has a bound to resolve.
-    const retention = await markRefusedWorkerAccounts(manifest, retentionReason(error));
+    // it attempted before the step fails, so the reconcile operation has a bound to resolve. The
+    // reason names the failure that actually happened: a Service refusal, or a failure that never
+    // reached the Service because the request could not be built.
+    const retention = await markRefusedWorkerAccounts(manifest,
+      retentionReason(error, { serviceCleanupRequested: requested }));
     throw new WorkerCleanupRetentionError(error, {
       retained: retention.retained,
       notCreated: notCreatedWorkerAccounts(manifest).map(account => account.email),

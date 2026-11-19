@@ -253,6 +253,49 @@ test('the live seam is one bounded cloudformation describe-stacks read and nothi
   await assert.rejects(readVersionPublication(liveCapabilityIo({ environment: {}, execute: () => '{}' })), /returned no readable stack list/);
 });
 
+test('a stopped deployment refuses as absent, while a genuine read failure keeps its own error', async () => {
+  // The AWS CLI's own answer when the stack does not exist — the stopped-Beta case. The named
+  // `describe-stacks` never returns an empty list for a missing stack; it exits non-zero with
+  // this ValidationError, and that must become the typed `absent` refusal rather than a generic
+  // read failure.
+  const missingStack = 'An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id AnyWearRuntimeStack-beta does not exist';
+  const stopped = () => liveCapabilityIo({
+    environment: {},
+    execute: () => { throw Object.assign(new Error('Command failed: aws cloudformation describe-stacks'), { stderr: Buffer.from(`${missingStack}\n`) }); },
+  });
+  await assertRefusal(readVersionPublication(stopped()), {
+    reason: 'absent', includes: ['value=<absent>', 'does not exist'],
+  });
+  await assertRefusal(resolveVersionArn(stopped()), { reason: 'absent' });
+  // Through the CLI the same refusal goes to stderr and exits non-zero with no stdout value.
+  const stdout = [];
+  const stderr = [];
+  assert.equal(await runCapabilityCli(['resolve'], {
+    io: stopped(), write: (text) => stdout.push(text), writeError: (text) => stderr.push(text),
+  }), 1);
+  assert.deepEqual(stdout, []);
+  assert.ok(stderr.join('').includes('(absent)'));
+  assert.ok(stderr.join('').includes('AnyWearRuntimeStack-beta'));
+
+  // Every other failure keeps its generic error, so a transient fault is never read as an absent
+  // publication. A missing stack in another answer shape is not this refusal either.
+  for (const failure of [
+    'An error occurred (AccessDenied) when calling the DescribeStacks operation: User is not authorized to perform: cloudformation:DescribeStacks',
+    'An error occurred (Throttling) when calling the DescribeStacks operation: Rate exceeded',
+    'Unable to locate credentials. You can configure credentials by running "aws configure".',
+    'Stack with id SomeOtherStack does not exist',
+  ]) {
+    const failing = liveCapabilityIo({
+      environment: {},
+      execute: () => { throw Object.assign(new Error('Command failed'), { stderr: Buffer.from(`${failure}\n`) }); },
+    });
+    await assert.rejects(readVersionPublication(failing), (error) => error instanceof Error
+      && error.name !== 'CleanupCapabilityRefusal'
+      && /AWS read failed for cloudformation describe-stacks/.test(error.message)
+      && error.message.includes(failure.split('\n')[0].slice(0, 40)), failure);
+  }
+});
+
 test('the resolver has one source for the grammar and no committed version ARN', () => {
   // The grammar is imported from the operation, never restated: the resolver is the read half
   // of one constant, so the read and the transport cannot disagree about a version ARN.

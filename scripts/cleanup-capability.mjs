@@ -55,10 +55,10 @@ function shownValue(value) {
  * to and the grammar that was applied, so an operator can act on it without reading this file.
  */
 export class CleanupCapabilityRefusal extends Error {
-  constructor(reason, { value, detail } = {}) {
+  constructor(reason, { value, detail, cause } = {}) {
     if (!REFUSAL_REASONS.includes(reason)) throw new Error(`Unknown cleanup capability refusal reason: ${reason}`);
     super(`Cleanup capability version refused (${reason}): value=${shownValue(value)}; stack=${RUNTIME_STACK_NAME}; `
-      + `grammar=${CLEANUP_VERSION_ARN.source}${detail ? `; ${detail}` : ''}`);
+      + `grammar=${CLEANUP_VERSION_ARN.source}${detail ? `; ${detail}` : ''}`, cause === undefined ? undefined : { cause });
     this.name = 'CleanupCapabilityRefusal';
     this.code = 'E2E_CLEANUP_CAPABILITY_REFUSED';
     this.reason = reason;
@@ -67,6 +67,16 @@ export class CleanupCapabilityRefusal extends Error {
     if (value !== undefined) this.value = value;
   }
 }
+
+/**
+ * The one CLI answer that is an absence rather than a failure (#287).
+ *
+ * A stopped stage has no `AnyWearRuntimeStack-beta`, and the AWS CLI says so with a
+ * `ValidationError` naming the stack it could not find. That is the absent publication the design
+ * refuses as `absent`; every other failure — a denied call, a throttle, a network error, a missing
+ * CLI — keeps its own error, so a transient fault is never mislabelled as an absent publication.
+ */
+const MISSING_STACK = /Stack with id (\S+) does not exist/;
 
 /**
  * The live seam, in the shape `scripts/infra-observation.mjs` established: `aws` is the CLI this
@@ -85,6 +95,13 @@ export function liveCapabilityIo({ execute = execFileSync, environment = process
       } catch (error) {
         const detail = (error.stderr?.toString?.() || error.message || String(error))
           .trim().split('\n').slice(0, 4).join(' ');
+        const missing = MISSING_STACK.exec(detail);
+        if (missing && args[0] === 'cloudformation' && args[1] === 'describe-stacks' && missing[1] === RUNTIME_STACK_NAME) {
+          throw new CleanupCapabilityRefusal('absent', {
+            detail: `the deployment reports ${JSON.stringify(missing[1])} does not exist (${detail})`,
+            cause: error,
+          });
+        }
         throw new Error(`AWS read failed for ${args.join(' ')}: ${detail}`, { cause: error });
       }
       return stdout.trim() ? parseStrictJson(stdout) : {};
