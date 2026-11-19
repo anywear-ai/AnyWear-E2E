@@ -127,10 +127,6 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
     // overhead; this completion wait does not assert a latency SLA.
     test.setTimeout(720_000);
 
-    page.on('dialog', async (dialog) => {
-      await dialog.accept();
-    });
-
     const serviceUrl = requireEnvironment('E2E_SERVICE_URL');
     const serviceOrigin = serviceOriginOf(serviceUrl);
     const serviceJson = (criteria: { method: string; path?: string }) => serviceResponseMatcher(serviceOrigin, criteria);
@@ -264,9 +260,31 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
 
     await editedCard.click();
     await expect(details).toBeVisible();
-    const deleted = page.waitForResponse(serviceJson({ method: 'DELETE', path: new URL(ownedItemUrl).pathname }));
-    await details.getByRole('button', { name: 'Delete', exact: true }).click();
-    expect((await deleted).status()).toBe(200);
+
+    // #303 replaced the host confirm with an in-page question: the dialog's
+    // Delete only opens it, and nothing is sent until its own Delete is pressed.
+    const deleteControl = details.getByRole('button', { name: 'Delete', exact: true });
+    await expect(deleteControl, 'the Item Details dialog must offer a Delete control')
+      .toBeVisible({ timeout: 10_000 });
+    await deleteControl.click({ timeout: 10_000 });
+
+    const deleteQuestion = details.getByRole('group', { name: 'Delete this item?', exact: true });
+    await expect(deleteQuestion, 'pressing Delete must open the in-page "Delete this item?" question')
+      .toBeVisible({ timeout: 10_000 });
+    const confirmDelete = deleteQuestion.getByRole('button', { name: 'Delete', exact: true });
+    await expect(confirmDelete, 'the delete question must offer an enabled Delete affirmative')
+      .toBeEnabled({ timeout: 10_000 });
+
+    // Armed only once the control is proven operable, and before the one click
+    // that can send the request.
+    const [deleted] = await Promise.all([
+      page.waitForResponse(
+        serviceJson({ method: 'DELETE', path: new URL(ownedItemUrl).pathname }),
+        { timeout: 30_000 },
+      ),
+      confirmDelete.click({ timeout: 10_000 }),
+    ]);
+    expect(deleted.status()).toBe(200);
     await expect(details).not.toBeVisible();
     await expect(editedCard).toHaveCount(0);
     const deletedItem = await page.request.get(ownedItemUrl, { headers });
