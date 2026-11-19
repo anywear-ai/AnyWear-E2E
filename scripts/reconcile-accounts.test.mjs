@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { cleanupStartGuard } from './cleanup-capability.mjs';
+import { runCleanupOperation } from '../tests/support/service-cleanup-operation.ts';
 import {
   assertIdentitySetWithinContract,
   buildIdentitySet,
@@ -297,6 +299,88 @@ function harness({ artifacts = [], events = [], users = [], cleanup = async () =
 function retainedFixture({ accounts = [manifestRecord({ subject: subject(1) })], runId = 123, attempt = 1 } = {}) {
   const fixture = manifestFixture(runId, attempt, accounts);
   return artifactFixture(0, { runId, attempt, manifest: fixture.manifest });
+}
+
+// #287: the reconcile never resolves the capability version again. It submits the pin its job
+// environment carries, and the start guard re-checks that pin against the deployment before the
+// start. `deploymentIo` is that deployment read, as the qualification role sees it.
+const versionArn = version => `arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:${version}`;
+function deploymentIo(version) {
+  return {
+    calls: [],
+    async aws(args) {
+      this.calls.push(args);
+      return { Stacks: [{ StackName: 'AnyWearRuntimeStack-beta',
+        StackId: 'arn:aws:cloudformation:ap-east-1:650880818323:stack/AnyWearRuntimeStack-beta/8f1e0c60',
+        StackStatus: 'UPDATE_COMPLETE',
+        Outputs: [{ OutputKey: 'CleanupOperationCleanupStateMachineVersionArn18053210', OutputValue: versionArn(version) }] }] };
+    },
+  };
+}
+
+const cleanupTaskArn = kind => `arn:aws:ecs:ap-east-1:650880818323:task/beta-anywear/${(kind === 'verification' ? '1' : '2').repeat(32)}`;
+const cleanupTaskDefinition = kind => `arn:aws:ecs:ap-east-1:650880818323:task-definition/${kind === 'verification' ? 'beta-anywear-cleanup-verify' : 'beta-anywear-cleanup'}:7`;
+
+/**
+ * A Step Functions transport that answers one started execution as a complete, verified cleanup:
+ * generation 0 is absent, the start is recorded, both ECS legs have aged out (`MISSING`) and the
+ * cleanup stream carries the committed marker. The version ARN the operation submits is therefore
+ * observable from the evidence it writes, without any AWS call.
+ */
+function verifiedCleanupTransport(pinned) {
+  const executions = new Map();
+  const started = [];
+  const transport = {
+    started,
+    async describe(executionArn) {
+      const name = executionArn.split(':').at(-1);
+      const envelope = executions.get(name);
+      if (!envelope) throw Object.assign(new Error('Execution does not exist'), { name: 'ExecutionDoesNotExist' });
+      const output = { schema_version: 1, record_type: 'anywear_beta_cleanup_tasks', operation_mode: envelope.operation_mode,
+        operation_id: envelope.operation_id, request_sha256: envelope.request_sha256, run_scope: envelope.run_scope,
+        service_commit_sha: envelope.service_commit_sha, service_image_digest: envelope.service_image_digest,
+        cluster_arn: 'arn:aws:ecs:ap-east-1:650880818323:cluster/beta-anywear', log_group_name: '/anywear/beta/one-shot',
+        ...Object.fromEntries(['verification', 'cleanup'].flatMap(kind => Object.entries({
+          task_arn: cleanupTaskArn(kind), task_definition_arn: cleanupTaskDefinition(kind), task_status: 'STOPPED',
+          exit_code: 0, log_stream_prefix: kind === 'verification' ? 'beta-anywear-cleanup-verify' : 'beta-anywear-cleanup',
+        }).map(([key, value]) => [`${kind}_${key}`, value]))) };
+      return {
+        executionArn, name, stateMachineArn: pinned.replace(/:[1-9][0-9]*$/, ''), stateMachineVersionArn: pinned,
+        input: JSON.stringify(envelope), inputDetails: { included: true }, status: 'SUCCEEDED',
+        output: JSON.stringify(output), outputDetails: { included: true },
+        startDate: new Date(NOW), stopDate: new Date(NOW + 1_000),
+      };
+    },
+    async start(input, executionName) {
+      executions.set(executionName, input);
+      started.push({ name: executionName, input });
+      return {};
+    },
+    async aws(args) {
+      if (args[1] === 'describe-tasks') return { failures: [{ arn: args.at(-1), reason: 'MISSING' }], tasks: [] };
+      // The marker is read once, from the first page; a next-token page is empty, as the real
+      // `get-log-events` answers when the stream is exhausted.
+      if (args.includes('--next-token')) return { events: [], nextForwardToken: 'end' };
+      const [, envelope] = [...executions.entries()][0];
+      const committed = { schema_version: 1, record_type: 'anywear_beta_cleanup_result', source: 'beta-tester-cleanup',
+        cleanup: 'beta-testers', operation_mode: envelope.operation_mode, operation_id: envelope.operation_id,
+        request_sha256: envelope.request_sha256, run_scope: envelope.run_scope, transaction_committed: true,
+        service_commit_sha: envelope.service_commit_sha, service_image_digest: envelope.service_image_digest,
+        envelope_sha256: createHash('sha256').update(JSON.stringify(envelope)).digest('hex'),
+        users: 1, missingUsers: 0, tasks: 0, outbox: 0, idempotency: 0, generations: 0, relations: 0, outfits: 0,
+        items: 0, photos: 0, objects: 2, objectsMissing: 0, dlq: { deleted: 0, preserved: 0 } };
+      return { events: [{ message: `ANYWEAR_BETA_CLEANUP_RESULT=${JSON.stringify(committed)}` }], nextForwardToken: 'end' };
+    },
+    async sleep() {},
+  };
+  return transport;
+}
+
+/** The one cleanup record a reconcile run wrote into its own directory. */
+async function readCleanupEvidence(directory) {
+  const file = (await readdir(directory)).find(name => /^service-cleanup-\d+-.*\.json$/.test(name));
+  assert.ok(file, 'the reconcile wrote its cleanup evidence');
+  return JSON.parse(await readFile(join(directory, file), 'utf8'));
 }
 
 test('the reconcile window is a closed lookback: seven days, or the one 90-day migration dispatch', () => {
@@ -1223,13 +1307,16 @@ test('the production cleanup wrapper passes the absolute deadline to the real cl
     async aws() { return {}; },
     async sleep() {},
   };
-  const io = createReconcileIo({ USER_POOL_ID: 'ap-east-1_example' }, { cleanupIo });
   const cleanupEnvironment = {
     E2E_CLEANUP_SERVICE_SHA: 'a'.repeat(40),
     E2E_CLEANUP_SERVICE_IMAGE_DIGEST: `sha256:${'b'.repeat(64)}`,
     BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: 'arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:7',
     E2E_SERVICE_CLEANUP_EVIDENCE_PATH: join(directory, 'service-cleanup-operation.json'),
   };
+  // #287: the wrapper's real path re-checks the pin before a start, so the deployment read is the
+  // fixture's too; a production default here would reach AWS from a unit test.
+  const io = createReconcileIo({ USER_POOL_ID: 'ap-east-1_example' },
+    { cleanupIo, capabilityIo: deploymentIo(7) });
   const inputs = { action: 'cleanup', emails: '[]', cleanup_json: JSON.stringify({
     runScope: '123-1-0123456789abcdef', users: [{ sub: subject(1), email: stable(0) }],
   }) };
@@ -1277,6 +1364,9 @@ test('a refused Service cleanup retains the identity, and a past-bound refusal f
   assert.equal(passed.record.result, 'passed', 'a retry inside the bound is the ordinary path');
   assert.deepEqual(passed.record.unresolved.map((entry) => entry.reason), ['service_cleanup_refused']);
   assert.deepEqual(passed.record.identities[0].actions, { service_cleanup: 'refused', cognito: 'not_attempted', objects: 'unavailable', readback: 'not_attempted' });
+  // #287: the identity is retained, not reconciled: the record says the cleanup refused and the
+  // deletion was never attempted.
+  assert.equal(passed.record.identities[0].outcome, 'retained');
 
   const pastBound = harness({
     artifacts: [retainedFixture({
@@ -1656,4 +1746,108 @@ test('the ordinary teardown passes no witness lookup, and a live reconcile never
   assert.equal(logs.some((line) => line.includes('cleanup record for')), false);
   // The reconcile supplies the lookup; only an exhausted live proof calls it.
   assert.equal(typeof harnessed.calls.find((call) => call.service).options.recovery, 'function');
+});
+
+test('the next reconcile heals without a deploy: a refusal at :7 is cleared by a :2 pass that starts generation 0 under :2', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'anywear-reconcile-heal-'));
+  try {
+    // First pass: the run pinned :7 and its cleanup refused. The record states the retention.
+    const refusing = harness({
+      artifacts: [retainedFixture()],
+      users: [{ email: stable(0), sub: subject(1) }],
+      cleanup: async () => { throw new Error('service cleanup refused'); },
+    });
+    const refused = await reconcileAccounts({ io: refusing.io, now: NOW, runIdentity, window: reconcileWindow(NOW),
+      environment: { BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: versionArn(7) } });
+    assert.deepEqual(refused.record.identities[0].actions,
+      { service_cleanup: 'refused', cognito: 'not_attempted', objects: 'unavailable', readback: 'not_attempted' });
+    assert.equal(refused.record.identities[0].outcome, 'retained');
+    assert.deepEqual(refused.record.unresolved.map((entry) => entry.reason), ['service_cleanup_refused']);
+
+    // Second pass, with no deploy in between beyond the publication moving to :2: the then-
+    // published version is what this run pins, and generation 0 is started under it.
+    const transport = verifiedCleanupTransport(versionArn(2));
+    const deployment = deploymentIo(2);
+    const healed = harness({
+      artifacts: [retainedFixture()],
+      users: [{ email: stable(0), sub: subject(1) }],
+      cleanup: async (inputs, environment, options) => {
+        const evidence = await runCleanupOperation(inputs, environment, transport, {
+          deadline: options.deadline,
+          beforeStart: cleanupStartGuard({ environment, io: deployment }),
+        });
+        return { proof_status: evidence.operation.proof_status, committed_result: evidence.operation.committed_result };
+      },
+    });
+    const reconciled = await reconcileAccounts({ io: healed.io, now: NOW, runIdentity, window: reconcileWindow(NOW),
+      environment: { BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: versionArn(2), E2E_ACCOUNT_RECONCILE_DIRECTORY: directory,
+        E2E_CLEANUP_SERVICE_SOURCE_SHA: 'a'.repeat(40), E2E_CLEANUP_SERVICE_IMAGE_DIGEST: `sha256:${'b'.repeat(64)}` } });
+
+    // One generation 0 start, submitted under the pinned :2, and a committed proof for it.
+    assert.equal(transport.started.length, 1);
+    assert.equal(transport.started[0].name.startsWith('beta-cleanup-'), true);
+    const evidence = await readCleanupEvidence(directory);
+    assert.equal(evidence.operation.state_machine_version_arn, versionArn(2));
+    assert.equal(evidence.operation.proof_status, 'verified');
+    assert.equal(evidence.operation.committed_result.objects, 2);
+    // The identity is deleted, its absence is read back, and the record says reconciled.
+    assert.deepEqual(reconciled.record.identities[0].actions,
+      { service_cleanup: 'committed', cognito: 'deleted', objects: 'deleted', readback: 'absent' });
+    assert.equal(reconciled.record.identities[0].outcome, 'reconciled');
+    assert.deepEqual(reconciled.record.unresolved, []);
+    assert.equal(reconciled.record.result, 'passed');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('the production cleanup wrapper re-checks the pin before the start and starts nothing when it moved', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'anywear-reconcile-pin-'));
+  const transport = () => ({
+    calls: [],
+    async describe() { this.calls.push('describe'); throw Object.assign(new Error('Execution does not exist'), { name: 'ExecutionDoesNotExist' }); },
+    async start() { this.calls.push('start'); return {}; },
+    async aws() { this.calls.push('aws'); return {}; },
+    async sleep() {},
+  });
+  const inputs = { action: 'cleanup', emails: '[]', cleanup_json: JSON.stringify({
+    runScope: '123-1-0123456789abcdef', users: [{ sub: subject(1), email: stable(0) }],
+  }) };
+  const cleanupEnvironment = (evidencePath) => ({
+    E2E_CLEANUP_SERVICE_SHA: 'a'.repeat(40),
+    E2E_CLEANUP_SERVICE_IMAGE_DIGEST: `sha256:${'b'.repeat(64)}`,
+    BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: versionArn(7),
+    E2E_SERVICE_CLEANUP_EVIDENCE_PATH: evidencePath,
+  });
+  const stale = transport();
+  const io = createReconcileIo({ USER_POOL_ID: 'ap-east-1_example' }, { cleanupIo: stale, capabilityIo: deploymentIo(2) });
+  const accepted = transport();
+  const matching = createReconcileIo({ USER_POOL_ID: 'ap-east-1_example' }, { cleanupIo: accepted, capabilityIo: deploymentIo(7) });
+  try {
+    const staleEnvironment = cleanupEnvironment(join(directory, 'stale.json'));
+    await assert.rejects(
+      io.runServiceCleanup(inputs, staleEnvironment, { deadline: Date.now() + 60_000 }),
+      (error) => error instanceof Error && error.cause?.name === 'CleanupCapabilityRefusal' && error.cause.reason === 'drift',
+    );
+    assert.equal(stale.calls.includes('start'), false, 'a superseded pin starts nothing');
+    const evidence = JSON.parse(await readFile(staleEnvironment.E2E_SERVICE_CLEANUP_EVIDENCE_PATH, 'utf8')).operation;
+    assert.equal(evidence.proof_status, 'refused');
+    assert.equal(evidence.refusal_phase, 'operation_start');
+    assert.equal(evidence.state_machine_version_arn, versionArn(7));
+
+    // The same wrapper reaches the start when the pin is what the stack publishes: the deadline
+    // stop proves the start happened, and the pin it submitted is the environment's.
+    const matchingEnvironment = cleanupEnvironment(join(directory, 'matching.json'));
+    await assert.rejects(
+      matching.runServiceCleanup(inputs, matchingEnvironment, { deadline: Date.now() - 1 }),
+      (error) => error instanceof Error && error.name === 'CleanupDeadlineExceeded',
+    );
+    assert.equal(accepted.calls.includes('start'), true);
+    const submitted = JSON.parse(await readFile(matchingEnvironment.E2E_SERVICE_CLEANUP_EVIDENCE_PATH, 'utf8')).operation;
+    assert.equal(submitted.state_machine_version_arn, versionArn(7));
+  } finally {
+    io.destroy();
+    matching.destroy();
+    await rm(directory, { recursive: true, force: true });
+  }
 });

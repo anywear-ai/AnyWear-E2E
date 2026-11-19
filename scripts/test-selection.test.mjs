@@ -417,10 +417,13 @@ test('the qualification workflow writes the report the record reads, in every ar
     assert.ok(block.includes(QUALIFICATION_REPORT_PATH), `${upload} must retain the report the record hashes`);
   }
 
-  // The suite step still runs the guard and exactly one release-gating invocation, and adds
-  // no reporter flag: the report path travels through the job environment, not the command.
+  // The suite step still runs the guard, the cleanup capability gate (#287) and exactly one
+  // release-gating invocation, and adds no reporter flag: the report path travels through the
+  // job environment, not the command. The gate is the first command after the guard, so a run
+  // whose pinned cleanup version moved creates no account.
   const suite = qualificationSuiteStep();
-  assert.deepEqual(suite.run.map((line) => line.trim()).filter(Boolean), ['node scripts/execution-guard.mjs', 'pnpm test']);
+  assert.deepEqual(suite.run.map((line) => line.trim()).filter(Boolean),
+    ['node scripts/execution-guard.mjs', 'node scripts/cleanup-capability.mjs gate', 'pnpm test']);
   assert.doesNotMatch(suite.run.join('\n'), /--reporter|--output/);
 });
 

@@ -376,3 +376,91 @@ test('the daily reconcile schedule dispatches the protected operation and holds 
   assert.match(dispatch, /timeout-minutes: 5/);
   assert.match(dispatch, /if: github\.ref == 'refs\/heads\/main'/);
 });
+
+// #287: the cleanup capability version ARN is read from the deployment by one resolver, pinned
+// once per job, and gated before the first account or deletion. The retired repository variable
+// must not return, and no second reader may appear.
+function stepSection(section, header) {
+  const start = section.indexOf(`- name: ${header}`);
+  assert.ok(start >= 0, `${header} must be a step of this job`);
+  const rest = section.slice(start + 1);
+  const next = rest.search(/\n {6}- name: /);
+  return `- name: ${header}` + (next < 0 ? rest : rest.slice(0, next));
+}
+
+test('the three entries read the cleanup capability version from the deployment, once per job', () => {
+  // No workflow reads the retired repository variable, in any spelling.
+  for (const [name, source] of [['beta-qualification.yml', qualify], ['check.yml', check], ['reconcile-schedule.yml', schedule]]) {
+    assert.doesNotMatch(source, /vars\.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN/, `${name} must not read the retired repository variable`);
+  }
+  const entries = [
+    ['reconcile', 'Load the Beta pool and the live cleanup identity'],
+    ['full', 'Load Beta test identity configuration'],
+    ['smoke', 'Load Beta test identity configuration'],
+  ];
+  for (const [name, header] of entries) {
+    const section = job(name);
+    // Exactly one resolve in the job: nothing re-resolves the value for use.
+    assert.equal([...section.matchAll(/node scripts\/cleanup-capability\.mjs resolve/g)].length, 1,
+      `${name} must resolve the version exactly once in its job`);
+    const identity = stepSection(section, header);
+    // The resolve sits inside the identity-configuration step that fixes the envelope's Service
+    // identity, and the command substitution is the command: a refused resolve fails the step.
+    assert.match(identity, /version_arn=\$\(node scripts\/cleanup-capability\.mjs resolve\)/,
+      `${name} must pin the resolved value with a command substitution that carries the failure`);
+    // It is the step's first command, so a refused read stops the job before it reads anything
+    // else, creates a test account or deletes an identity.
+    const identityCommands = identity.split('\n').map((line) => line.trim()).filter(Boolean);
+    assert.equal(identityCommands[identityCommands.indexOf('run: |') + 1],
+      'version_arn=$(node scripts/cleanup-capability.mjs resolve)',
+      `${name} must resolve the version as the first command of its identity step`);
+    assert.match(identity, /echo "BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=\$version_arn"/,
+      `${name} must pin the resolved value in the job environment`);
+    assert.match(identity, /\} >> "\$GITHUB_ENV"/,
+      `${name} must append the resolved value to the job environment`);
+    // The pin is written once: no later step re-derives or overwrites it.
+    assert.equal([...section.matchAll(/BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=/g)].length, 1,
+      `${name} must write the pin exactly once`);
+  }
+  // The gate is the first command after the execution guard, before the point that creates the
+  // first account (`full`, `smoke`) or deletes the first identity (`reconcile`).
+  const gated = [
+    ['full', 'Run the release-gating business regression suite', 'pnpm test'],
+    ['smoke', 'Run deployed Beta smoke tests', 'pnpm test:smoke'],
+    ['reconcile', 'Reconcile recent E2E leftover identities', 'node scripts/reconcile-accounts.mjs'],
+  ];
+  for (const [name, header, command] of gated) {
+    const lines = stepSection(job(name), header).split('\n').map((line) => line.trim()).filter(Boolean);
+    const run = lines.indexOf('run: |');
+    assert.ok(run >= 0, `${name} suite step must declare a run block`);
+    assert.deepEqual(lines.slice(run + 1),
+      ['node scripts/execution-guard.mjs', 'node scripts/cleanup-capability.mjs gate', command],
+      `${name}: the gate must be the first command after the execution guard`);
+  }
+  // The gate runs before the suite (or the reconcile pass) in every job, because it is earlier in
+  // the same step. A run that cannot read the publication therefore creates no account.
+  for (const [name] of gated) assert.match(job(name), /node scripts\/cleanup-capability\.mjs gate/);
+});
+
+test('no workflow or shipped script carries a version ARN or a second reader', () => {
+  const scripts = readdirSync(join(repositoryRoot, 'scripts'))
+    .filter((name) => /\.mjs$/.test(name) && !/\.test\.mjs$/.test(name)).sort();
+  assert.ok(scripts.includes('cleanup-capability.mjs'), 'the resolver must exist');
+  for (const name of scripts) {
+    const text = readFileSync(join(repositoryRoot, 'scripts', name), 'utf8');
+    // The only copy of the version-ARN grammar is the reviewed constant in the operation; a
+    // shipped script carries no ARN literal, so no copy of a deployed revision is committed.
+    assert.doesNotMatch(text, /arn:aws:states:[a-z0-9-]+:\d{12}:stateMachine:/, `${name} must not carry a version ARN`);
+    assert.doesNotMatch(text, /list-state-machine-versions/, `${name} must not read the published-version list`);
+  }
+  for (const name of entries) {
+    assert.doesNotMatch(read(name), /arn:aws:states:[a-z0-9-]+:\d{12}:stateMachine:/, `${name} must not carry a version ARN`);
+  }
+  // The resolver is the only reader: no other shipped script invokes it or the variable.
+  const readers = scripts.filter((name) => name !== 'cleanup-capability.mjs'
+    && readFileSync(join(repositoryRoot, 'scripts', name), 'utf8').includes('cleanup-capability.mjs'));
+  assert.deepEqual(readers, ['cleanup-worker-accounts.mjs', 'reconcile-accounts.mjs'],
+    'only the teardown and the reconcile import the start guard, and neither resolves the value');
+  // `minimum-supported-client.json` remains the only committed live-path input.
+  assert.equal(existsSync(join(repositoryRoot, 'minimum-supported-client.json')), true);
+});

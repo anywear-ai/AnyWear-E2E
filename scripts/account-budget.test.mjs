@@ -12,6 +12,7 @@ import {
   releaseWorkerAccount,
   reserveAccount,
   retainAccount,
+  retainAttemptedAccount,
 } from '../tests/support/account-budget.ts';
 
 const environment = [
@@ -333,6 +334,57 @@ test('six attempt reservations of two pool slots fit the per-run cap and the sev
   const manifest = JSON.parse(await readFile(process.env.E2E_ACCOUNT_BUDGET_PATH, 'utf8'));
   assert.equal(manifest.accounts.length, 6);
   assert.deepEqual(manifest.accounts.map(({ status }) => status), Array(6).fill('deleted'));
+});
+
+// #287: a refused teardown retains exactly the identities it attempted. The write resolves by
+// the captured address *and* subject, never by "the latest record for this email".
+const CAPTURED_SUBJECT = '10000000-0000-4000-8000-000000000001';
+const LATER_SUBJECT = '20000000-0000-4000-8000-000000000002';
+const ledgerState = (accounts, runScope) => ({ version: 1, runScope, config: { maxActiveAccounts: 1, maxNewAccountsPerRun: 2 }, accounts });
+const ledgerAccount = (overrides = {}) => ({ email: workerAddress(), subject: CAPTURED_SUBJECT, mode: 'worker',
+  status: 'cleanup_pending', leaseId: 'lease-1', leaseGeneration: 'generation-1',
+  createdAt: '2026-10-16T05:03:56.709Z', updatedAt: '2026-10-16T05:03:56.709Z', ...overrides });
+
+async function writeLedger(accounts) {
+  await configureBudget();
+  await writeFile(process.env.E2E_ACCOUNT_BUDGET_PATH,
+    `${JSON.stringify(ledgerState(accounts, process.env.E2E_ACCOUNT_RUN_SCOPE), null, 2)}\n`);
+}
+
+test('the retention write lands on the captured identity, never on the latest lease of a reused address', async () => {
+  const captured = ledgerAccount();
+  // A later lease of the same pool address: "the latest record for this email" would be this one.
+  const later = ledgerAccount({ subject: LATER_SUBJECT, status: 'in_use', leaseId: 'lease-2',
+    leaseGeneration: 'generation-2', createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z' });
+  await writeLedger([captured, later]);
+
+  assert.equal(await retainAttemptedAccount({ email: captured.email, subject: CAPTURED_SUBJECT },
+    'service cleanup refused; CleanupCapabilityRefusal: drift'), true);
+  const state = JSON.parse(await readFile(process.env.E2E_ACCOUNT_BUDGET_PATH, 'utf8'));
+  assert.deepEqual(state.accounts.map(account => account.status), ['retained', 'in_use']);
+  assert.match(state.accounts[0].retainedReason, /service cleanup refused/);
+  // The bound is exactly 24 hours after the captured record's own createdAt.
+  assert.equal(state.accounts[0].reconcileBy, '2026-10-17T05:03:56.709Z');
+  // The newer lease keeps its status and carries no retention reason of its own.
+  assert.equal(state.accounts[1].retainedReason, undefined);
+  assert.equal(state.accounts[1].reconcileBy, undefined);
+});
+
+test('a retention write for a lease that captured no identity writes nothing', async () => {
+  await writeLedger([]);
+  assert.equal(await retainAttemptedAccount({ email: workerAddress(1) }, 'service cleanup refused'), false);
+  assert.equal(await retainAttemptedAccount({ email: workerAddress(1), subject: CAPTURED_SUBJECT }, 'service cleanup refused'), false);
+  const state = JSON.parse(await readFile(process.env.E2E_ACCOUNT_BUDGET_PATH, 'utf8'));
+  assert.deepEqual(state.accounts, [], 'a never-created lease is never written retained');
+});
+
+test('a later retention write never resurrects a deleted record', async () => {
+  const deleted = ledgerAccount({ status: 'deleted', reason: 'released after verified identity absence' });
+  await writeLedger([deleted]);
+  assert.equal(await retainAttemptedAccount({ email: deleted.email, subject: CAPTURED_SUBJECT }, 'service cleanup refused'), false);
+  const state = JSON.parse(await readFile(process.env.E2E_ACCOUNT_BUDGET_PATH, 'utf8'));
+  assert.equal(state.accounts[0].status, 'deleted');
+  assert.equal(state.accounts[0].retainedReason, undefined);
 });
 
 async function configureBudget(maxNewAccountsPerRun = 2) {

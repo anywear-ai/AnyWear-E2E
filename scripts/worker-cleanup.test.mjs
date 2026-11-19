@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { runCleanupOperation } from '../tests/support/service-cleanup-operation.ts';
 import {
   cleanupWorkerAccounts,
   createServiceCleanupInputs,
@@ -10,7 +12,7 @@ import {
   releaseWorkerLease,
   workerLeaseGateError,
 } from '../tests/support/worker-cleanup.ts';
-import { markRepairedWorkerAccounts, skippedWorkerAccounts } from './cleanup-worker-accounts.mjs';
+import { markRepairedWorkerAccounts, notCreatedWorkerAccounts, runCapturedWorkerCleanup, skippedWorkerAccounts } from './cleanup-worker-accounts.mjs';
 
 const runScope = `123456789-1-${'a'.repeat(16)}`;
 const workerEmail = `e2e-beta-${runScope}-0-a1b2c3d4@anywear.local`;
@@ -227,17 +229,31 @@ test('a repaired retained record becomes deleted and keeps its reason', async ()
   }
 });
 
-test('a record left non-deleted is reported as skipped, an already deleted one is not', () => {
+test('a record left non-deleted with a captured identity is skipped, a never-created lease is not, and a deleted one is not', () => {
+  const foreignEmail = `e2e-beta-123456790-1-${'a'.repeat(16)}-0-a1b2c3d4@anywear.local`;
+  const neverCreatedEmail = `e2e-beta-${runScope}-1-b1c2d3e4@anywear.local`;
   const records = [
     { email: workerEmail, subject, mode: 'worker', status: 'retained' },
-    { email: stableWorkerEmail, mode: 'worker', status: 'retained' },
-    { email: `e2e-beta-${runScope}-1-b1c2d3e4@anywear.local`, subject, mode: 'worker', status: 'deleted' },
+    // A captured identity this manifest cannot prove belongs to it: reported as skipped, never
+    // silently dropped.
+    { email: foreignEmail, subject, mode: 'worker', status: 'retained' },
+    // A lease whose provisioning never completed is reported as not created, not as a leftover.
+    { email: neverCreatedEmail, mode: 'worker', status: 'provisioning' },
+    // A lease that claims it was in use without a captured subject is an anomaly, so it stays in
+    // the skipped report instead of being reported as never created.
+    { email: `e2e-beta-${runScope}-3-d1e2f3a4@anywear.local`, mode: 'worker', status: 'in_use' },
+    { email: `e2e-beta-${runScope}-2-c1d2e3f4@anywear.local`, subject, mode: 'worker', status: 'deleted' },
   ];
   const workerManifest = manifest(records);
   const admitted = records.filter((account) => isAdmittedCleanupWorker(account, workerManifest));
   assert.deepEqual(admitted.map((account) => account.email), [workerEmail]);
-  // The unproven retained record is the only one the step leaves behind.
-  assert.deepEqual(skippedWorkerAccounts(workerManifest, admitted).map((account) => account.email), [stableWorkerEmail]);
+  // The unproven retained and the subject-less in-use record are the ones the step leaves behind.
+  assert.deepEqual(skippedWorkerAccounts(workerManifest, admitted).map((account) => account.email), [
+    foreignEmail, `e2e-beta-${runScope}-3-d1e2f3a4@anywear.local`,
+  ]);
+  // The lease that never completed provisioning is a separate report, never "left non-deleted".
+  assert.deepEqual(notCreatedWorkerAccounts(workerManifest).map((account) => account.email), [neverCreatedEmail]);
+  assert.equal(skippedWorkerAccounts(workerManifest, admitted).some((account) => account.email === neverCreatedEmail), false);
 });
 
 test('changed Cognito subject is retained after successful application cleanup', async () => {
@@ -393,4 +409,189 @@ test('a refused retain record or a refused release write still reports the attem
   assert.equal(released.scope, 'retained');
   assert.match(released.reason, /could not be released/);
   assert.deepEqual(refusedRelease.calls.at(-1), { release: workerEmail });
+});
+
+// #287: a refused teardown is a recorded retention, not a silent residue. The fixtures below run
+// the real `runCleanupOperation` against a fake cleanup transport and a fake deployment read, so
+// the refused evidence, the ledger write and the failure path are the production ones.
+const LEDGER_ENVIRONMENT = ['E2E_ACCOUNT_BUDGET_PATH', 'E2E_ACCOUNT_RUN_SCOPE', 'E2E_WORKERS',
+  'E2E_MAX_ACTIVE_ACCOUNTS', 'E2E_MAX_NEW_ACCOUNTS_PER_RUN'];
+const versionArn = version => `arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:${version}`;
+const publishedStack = version => ({ Stacks: [{ StackName: 'AnyWearRuntimeStack-beta',
+  StackId: 'arn:aws:cloudformation:ap-east-1:650880818323:stack/AnyWearRuntimeStack-beta/8f1e0c60',
+  StackStatus: 'UPDATE_COMPLETE',
+  Outputs: [{ OutputKey: 'CleanupOperationCleanupStateMachineVersionArn18053210', OutputValue: versionArn(version) }] }] });
+const capabilityIo = published => ({
+  calls: [],
+  async aws(args) { this.calls.push(args); return publishedStack(published); },
+});
+const cleanupEnvironment = (evidencePath, version = 7) => ({
+  E2E_CLEANUP_SERVICE_SHA: 'a'.repeat(40),
+  E2E_CLEANUP_SERVICE_IMAGE_DIGEST: `sha256:${'b'.repeat(64)}`,
+  BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: versionArn(version),
+  E2E_SERVICE_CLEANUP_EVIDENCE_PATH: evidencePath,
+});
+const ledgerRecord = (overrides = {}) => ({ email: workerEmail, subject, mode: 'worker', status: 'cleanup_pending',
+  leaseId: 'lease-1', leaseGeneration: 'generation-1', createdAt: '2026-10-16T05:03:56.709Z',
+  updatedAt: '2026-10-16T05:03:56.709Z', ...overrides });
+const ledgerDocument = accounts => ({ version: 1, runScope, config: { maxActiveAccounts: 1, maxNewAccountsPerRun: 2 }, accounts });
+const cleanupTransport = ({ startError, calls = [] } = {}) => ({
+  calls,
+  async describe(executionArn) {
+    calls.push({ describe: executionArn });
+    throw Object.assign(new Error('Execution does not exist'), { name: 'ExecutionDoesNotExist' });
+  },
+  async start(input, executionName) {
+    calls.push({ start: executionName });
+    if (startError) throw startError;
+    return {};
+  },
+  async aws(args) { calls.push({ aws: args }); return {}; },
+  async sleep() {},
+});
+
+test('a refused teardown retains exactly the captured identities it attempted, with the 24-hour bound, and fails the step', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'issue-287-retention-'));
+  const budgetPath = path.join(directory, 'account-budget.json');
+  const evidencePath = path.join(directory, 'service-cleanup-operation.json');
+  const neverCreatedEmail = `e2e-beta-${runScope}-1-b1c2d3e4@anywear.local`;
+  // A second lease of the same pool address, created later with a different subject.
+  const laterSubject = '20000000-0000-4000-8000-000000000002';
+  const saved = LEDGER_ENVIRONMENT.map(name => [name, process.env[name]]);
+  try {
+    process.env.E2E_ACCOUNT_BUDGET_PATH = budgetPath;
+    process.env.E2E_ACCOUNT_RUN_SCOPE = runScope;
+    process.env.E2E_WORKERS = '1';
+    process.env.E2E_MAX_ACTIVE_ACCOUNTS = '1';
+    process.env.E2E_MAX_NEW_ACCOUNTS_PER_RUN = '2';
+    const attempted = ledgerRecord();
+    const newerLease = ledgerRecord({ status: 'in_use', subject: laterSubject,
+      leaseId: 'lease-2', leaseGeneration: 'generation-2', createdAt: '2026-11-01T00:00:00.000Z' });
+    const neverCreated = { email: neverCreatedEmail, mode: 'worker', status: 'provisioning',
+      leaseId: 'lease-3', leaseGeneration: 'generation-2', createdAt: '2026-10-16T06:00:00.000Z',
+      updatedAt: '2026-10-16T06:00:00.000Z' };
+    await writeFile(budgetPath, `${JSON.stringify(ledgerDocument([attempted, newerLease, neverCreated]), null, 2)}\n`);
+
+    const transport = cleanupTransport({ startError: Object.assign(new Error('AccessDeniedException'), { name: 'AccessDeniedException' }) });
+    const error = await runCapturedWorkerCleanup(
+      manifest([attempted, neverCreated]),
+      cleanupEnvironment(evidencePath),
+      cleanupIo(),
+      { operation: (inputs, environment, _io, options) => runCleanupOperation(inputs, environment, transport, options),
+        capabilityIo: capabilityIo(7) },
+    ).then(() => assert.fail('a refused teardown must fail the step'), thrown => thrown);
+
+    // The cleanup evidence is a refusal with its own phase and category.
+    const operation = JSON.parse(await readFile(evidencePath, 'utf8')).operation;
+    assert.equal(operation.proof_status, 'refused');
+    assert.equal(operation.refusal_phase, 'operation_start');
+    assert.equal(operation.refusal_category, 'operation_start_unavailable');
+    assert.equal(operation.state_machine_version_arn, versionArn(7));
+
+    // Exactly the attempted record is retained, with the refusal and the exact bound.
+    const ledger = JSON.parse(await readFile(budgetPath, 'utf8'));
+    const [retained, newer, notCreatedRecord] = ledger.accounts;
+    assert.equal(retained.status, 'retained');
+    assert.match(retained.retainedReason, /service cleanup refused/);
+    assert.match(retained.retainedReason, /AccessDeniedException/);
+    assert.equal(retained.reconcileBy, '2026-10-17T05:03:56.709Z', 'the bound is exactly createdAt + 24 hours');
+    // The newer lease of the reused pool address is never touched by the older attempt's write.
+    assert.equal(newer.status, 'in_use');
+    assert.equal(newer.retainedReason, undefined);
+    // A lease that captured no identity is not written `retained`.
+    assert.equal(notCreatedRecord.status, 'provisioning');
+    assert.equal(notCreatedRecord.retainedReason, undefined);
+    // No attempted record is left cleanup_pending.
+    assert.equal(ledger.accounts.some(account => account.status === 'cleanup_pending'), false);
+
+    // The failure the step reports names the retention, so the run's own outcome records it.
+    assert.equal(error.name, 'WorkerCleanupRetention');
+    assert.deepEqual(error.retained, [workerEmail]);
+    assert.deepEqual(error.notCreated, [neverCreatedEmail]);
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('the start guard runs before the teardown start, so a superseded pin starts nothing and retains the identity', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'issue-287-start-guard-'));
+  const budgetPath = path.join(directory, 'account-budget.json');
+  const evidencePath = path.join(directory, 'service-cleanup-operation.json');
+  const saved = LEDGER_ENVIRONMENT.map(name => [name, process.env[name]]);
+  try {
+    process.env.E2E_ACCOUNT_BUDGET_PATH = budgetPath;
+    process.env.E2E_ACCOUNT_RUN_SCOPE = runScope;
+    process.env.E2E_WORKERS = '1';
+    process.env.E2E_MAX_ACTIVE_ACCOUNTS = '1';
+    process.env.E2E_MAX_NEW_ACCOUNTS_PER_RUN = '2';
+    await writeFile(budgetPath, `${JSON.stringify(ledgerDocument([ledgerRecord()]), null, 2)}\n`);
+
+    const transport = cleanupTransport();
+    const deployment = capabilityIo(2);
+    const error = await runCapturedWorkerCleanup(
+      manifest([ledgerRecord()]),
+      cleanupEnvironment(evidencePath, 7),
+      cleanupIo(),
+      { operation: (inputs, environment, _io, options) => runCleanupOperation(inputs, environment, transport, options),
+        capabilityIo: deployment },
+    ).then(() => assert.fail('a superseded pin must refuse the start'), thrown => thrown);
+
+    // The guard read the deployment and refused: nothing was started.
+    assert.deepEqual(deployment.calls[0], ['cloudformation', 'describe-stacks', '--stack-name', 'AnyWearRuntimeStack-beta']);
+    assert.equal(transport.calls.some(call => call.start), false);
+    const operation = JSON.parse(await readFile(evidencePath, 'utf8')).operation;
+    assert.equal(operation.proof_status, 'refused');
+    assert.match(operation.failure, /identities retained/);
+    const ledger = JSON.parse(await readFile(budgetPath, 'utf8'));
+    assert.equal(ledger.accounts[0].status, 'retained');
+    assert.equal(ledger.accounts[0].reconcileBy, '2026-10-17T05:03:56.709Z');
+    assert.equal(error.name, 'WorkerCleanupRetention');
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('a deleted record is never resurrected by a later retention write', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'issue-287-deleted-'));
+  const budgetPath = path.join(directory, 'account-budget.json');
+  const saved = LEDGER_ENVIRONMENT.map(name => [name, process.env[name]]);
+  try {
+    process.env.E2E_ACCOUNT_BUDGET_PATH = budgetPath;
+    process.env.E2E_ACCOUNT_RUN_SCOPE = runScope;
+    process.env.E2E_WORKERS = '1';
+    process.env.E2E_MAX_ACTIVE_ACCOUNTS = '1';
+    process.env.E2E_MAX_NEW_ACCOUNTS_PER_RUN = '2';
+    const deleted = ledgerRecord({ status: 'deleted', reason: 'released after verified identity absence' });
+    await writeFile(budgetPath, `${JSON.stringify(ledgerDocument([deleted]), null, 2)}\n`);
+    const { retainAttemptedAccount } = await import('../tests/support/account-budget.ts');
+    assert.equal(await retainAttemptedAccount({ email: workerEmail, subject }, 'service cleanup refused'), false);
+    const ledger = JSON.parse(await readFile(budgetPath, 'utf8'));
+    assert.equal(ledger.accounts[0].status, 'deleted');
+    assert.equal(ledger.accounts[0].retainedReason, undefined);
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('the teardown uses the subject-guarded retention and still fails the step', () => {
+  const source = readFileSync(new URL('./cleanup-worker-accounts.mjs', import.meta.url), 'utf8');
+  // The latest-record-by-email write is never used by this step: a reused pool address would
+  // otherwise retain a lease that belongs to a different attempt.
+  assert.match(source, /retainAttemptedAccount/);
+  assert.doesNotMatch(source, /import \{[^}]*\bretainAccount\b[^}]*\} from/, 'the teardown must not import the latest-by-email retention');
+  assert.doesNotMatch(source, /\bretainAccount\(/);
+  // The refusal path sets the step's exit code; the removal of the old deferral message is what
+  // makes "deferred" impossible to read as a clean teardown.
+  assert.match(source, /process\.exitCode = 1/);
+  assert.doesNotMatch(source, /Deferred exact E2E worker cleanup/);
+  assert.doesNotMatch(source, /cleanup deferred/);
 });

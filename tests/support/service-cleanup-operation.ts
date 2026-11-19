@@ -11,7 +11,16 @@ import type { ServiceCleanupInputs } from './worker-cleanup.js';
 const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const RUN_SCOPE = /^[1-9][0-9]{0,19}-[1-9][0-9]{0,5}-[a-f0-9]{16}$/;
-const VERSION_ARN = /^arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:([1-9][0-9]*)$/;
+/**
+ * The reviewed cleanup version-ARN grammar (#287): the reviewed account, Region,
+ * state-machine name and a positive version number.
+ *
+ * It is one constant with one purpose. This operation validates the pinned value with it, and
+ * `scripts/cleanup-capability.mjs` selects the one `AnyWearRuntimeStack-beta` output **value**
+ * that matches it, so the read and the transport cannot disagree about what a version ARN is.
+ * Nothing else may restate this grammar.
+ */
+export const CLEANUP_VERSION_ARN = /^arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:([1-9][0-9]*)$/;
 const TASK_ARN = /^arn:aws:ecs:ap-east-1:650880818323:task\/beta-anywear\/([a-f0-9]{32})$/;
 const DEFINITION_ARN = /^arn:aws:ecs:ap-east-1:650880818323:task-definition\/(beta-anywear-cleanup(?:-verify)?):[1-9][0-9]*$/;
 const CLUSTER = 'arn:aws:ecs:ap-east-1:650880818323:cluster/beta-anywear';
@@ -154,6 +163,15 @@ export interface CleanupOperationOptions {
    * is re-proved here before a record can stand in for the live task read.
    */
   recovery?: (executionName: string, stoppedAt: string) => Promise<ArtifactWitness | undefined> | ArtifactWitness | undefined;
+  /**
+   * The start guard (#287). It is called immediately before every **new** `StartExecution` —
+   * generation 0, `-retry1` and `-migration1` — and never before a resume or a verify, which
+   * start nothing. It re-applies the pinned-versus-published comparison the caller's entry
+   * already made, so a deploy that replaced the pinned version after that check cannot bind a
+   * deterministic execution name to a definition pair later dispatches can neither resume nor
+   * verify. A guard that throws starts nothing.
+   */
+  beforeStart?: () => Promise<void> | void;
 }
 
 interface CanonicalTask {
@@ -351,7 +369,7 @@ function boundedName(name: string): string {
 }
 
 export function cleanupExecutionArn(versionArn: string, name: string): string {
-  if (!VERSION_ARN.test(versionArn) || !/^[A-Za-z0-9_-]{1,80}$/.test(name)) throw new Error('Cleanup requires the fixed Beta state-machine version ARN and execution name');
+  if (!CLEANUP_VERSION_ARN.test(versionArn) || !/^[A-Za-z0-9_-]{1,80}$/.test(name)) throw new Error('Cleanup requires the fixed Beta state-machine version ARN and execution name');
   return `${versionArn.replace(/:stateMachine:/, ':execution:').replace(/:[1-9][0-9]*$/, '')}:${name}`;
 }
 
@@ -702,6 +720,25 @@ export class CleanupProofAbsentError extends Error {
   }
 }
 
+/**
+ * The pinned cleanup capability value is unusable (#287).
+ *
+ * Until this change an unset value returned `undefined` with a warning, so the caller retained
+ * every identity with no cleanup evidence and no statement of why. The replacement is typed and
+ * writes the same `proof_status: refused` record the execution paths write, so "created and not
+ * deleted" always carries a refusal phase and category. A run never defers silently.
+ */
+export class CleanupCapabilityRefusedError extends Error {
+  readonly code = 'E2E_CLEANUP_CAPABILITY_REFUSED';
+  readonly reason: 'unset' | 'malformed';
+
+  constructor(reason: 'unset' | 'malformed') {
+    super(`Cleanup capability version is ${reason}; Cognito identities retained`);
+    this.name = 'CleanupCapabilityRefusedError';
+    this.reason = reason;
+  }
+}
+
 /** Resume one execution: observe it until it is terminal, bounded to 900 observations or the deadline. */
 async function awaitTerminal(io: CleanupOperationIo, arn: string, envelope: CleanupOperationEnvelope, versionArn: string,
   name: string, evidence: CleanupOperationEvidence, path: string, initial?: DescribeExecutionOutput,
@@ -797,9 +834,16 @@ async function cleanupFamiliesStopped(io: CleanupOperationIo): Promise<string[]>
  * generation is defined only against an already-exhausted captured scope.
  * Generation 0 keeps its ordinary behavior — absent is started, running is
  * resumed, succeeded is verified — so a scope with no execution is still cleaned.
+ *
+ * The pinned version ARN is the only one this function submits, and it is validated against
+ * `CLEANUP_VERSION_ARN` before any read: an unset or malformed value is a typed refusal that
+ * writes `proof_status: refused` evidence, so no path defers the cleanup silently. Every new
+ * start — generation 0, `-retry1`, `-migration1` — first runs `options.beforeStart`, the
+ * caller's pinned-versus-published comparison (#287); a resume and a verify start nothing and
+ * never run it.
  */
 export async function runCleanupOperation(inputs: ServiceCleanupInputs, environment: NodeJS.ProcessEnv = process.env,
-  io?: CleanupOperationIo, options: CleanupOperationOptions = {}): Promise<CleanupOperationEvidence | undefined> {
+  io?: CleanupOperationIo, options: CleanupOperationOptions = {}): Promise<CleanupOperationEvidence> {
   // The allowance is an explicit opt-in, never a truthy side effect of a caller that
   // forwards an arbitrary options object. It is rejected before the first read or start.
   if (options.migrationGeneration !== undefined && typeof options.migrationGeneration !== 'boolean') {
@@ -807,14 +851,23 @@ export async function runCleanupOperation(inputs: ServiceCleanupInputs, environm
   }
   const migrationAllowed = options.migrationGeneration === true;
   const versionArn = environment.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN;
-  if (!versionArn) {
-    console.warn('Beta cleanup capability is not configured; cleanup deferred and identities retained');
-    return undefined;
-  }
   const envelope = createCleanupOperationEnvelope(inputs, environment);
+  const path = environment.E2E_SERVICE_CLEANUP_EVIDENCE_PATH ?? 'test-results/service-cleanup-operation.json';
+  // #287: an unusable pinned value is a typed refusal, never a silent defer. The record is
+  // written before the throw, so the refused state exists on disk with its phase and category
+  // even though no execution could be named.
+  if (!versionArn || !CLEANUP_VERSION_ARN.test(versionArn)) {
+    const reason = versionArn ? 'malformed' : 'unset';
+    const refusal = new CleanupCapabilityRefusedError(reason);
+    const refused: CleanupOperationEvidence = { schema_version: 4, record_type: 'anywear_e2e_service_cleanup_operation',
+      operation: { operation_mode: 'normal', state_machine_version_arn: versionArn ?? '', execution_arn: '', execution_name: '',
+        status: 'PENDING', proof_status: 'refused', failure: refusal.message, refusal_phase: 'operation_start',
+        refusal_category: 'operation_start_unavailable', input_sha256: hash(JSON.stringify(envelope)), input: envelope } };
+    await writeEvidence(path, refused);
+    throw refusal;
+  }
   const current = [expectedExecution(envelope, versionArn, 0), expectedExecution(envelope, versionArn, 1)];
   const transport = io ?? defaultIo(versionArn);
-  const path = environment.E2E_SERVICE_CLEANUP_EVIDENCE_PATH ?? 'test-results/service-cleanup-operation.json';
   const evidence: CleanupOperationEvidence = { schema_version: 4, record_type: 'anywear_e2e_service_cleanup_operation',
     operation: { operation_mode: 'normal', state_machine_version_arn: current[0].versionArn, execution_arn: current[0].arn,
       execution_name: current[0].name, status: 'PENDING', proof_status: 'pending',
@@ -840,6 +893,15 @@ export async function runCleanupOperation(inputs: ServiceCleanupInputs, environm
       if (!(error instanceof Error) || !['ExecutionAlreadyExists', 'TimeoutError', 'RequestTimeout', 'NetworkingError', 'InternalServerError', 'ServiceUnavailable'].includes(error.name)) throw error;
       // The exact resolution below settles a completed name or a lost response.
     }
+  };
+  /**
+   * Start one new generation (#287): the caller's guard runs first, every time, and a guard
+   * that throws starts nothing. A resume or a verify never reaches this, because neither
+   * creates an execution.
+   */
+  const guardedStart = async () => {
+    await options.beforeStart?.();
+    await start();
   };
   const verifySuccess = async (description: DescribeExecutionOutput, proofEnvelope: CleanupOperationEnvelope): Promise<CleanupOperationEvidence> => {
     refusalPhase = 'execution_observation';
@@ -936,7 +998,7 @@ export async function runCleanupOperation(inputs: ServiceCleanupInputs, environm
       target(expected);
       refusalPhase = 'operation_start';
       refusalCategory = 'operation_start_unavailable';
-      await start();
+      await guardedStart();
       refusalPhase = 'execution_observation';
       refusalCategory = 'execution_observation_unavailable';
       description = await awaitTerminal(transport, expected.arn, expected.envelope, expected.versionArn, expected.name, evidence, path, undefined, options.deadline);
@@ -975,7 +1037,7 @@ export async function runCleanupOperation(inputs: ServiceCleanupInputs, environm
       }
       refusalPhase = 'operation_start';
       refusalCategory = 'operation_start_unavailable';
-      await start();
+      await guardedStart();
       refusalPhase = 'execution_observation';
       refusalCategory = 'execution_observation_unavailable';
       retry = await awaitTerminal(transport, current[1].arn, current[1].envelope, current[1].versionArn, current[1].name, evidence, path, undefined, options.deadline);
@@ -1015,7 +1077,7 @@ export async function runCleanupOperation(inputs: ServiceCleanupInputs, environm
       await writeEvidence(path, evidence);
       refusalPhase = 'operation_start';
       refusalCategory = 'operation_start_unavailable';
-      await start();
+      await guardedStart();
       refusalPhase = 'execution_observation';
       refusalCategory = 'execution_observation_unavailable';
       migrated = await awaitTerminal(transport, migration.arn, migration.envelope, migration.versionArn, migration.name, evidence, path, undefined, options.deadline);

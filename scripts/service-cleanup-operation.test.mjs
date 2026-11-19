@@ -944,3 +944,148 @@ test('the replay chain leaves no tracked production reference or callerless entr
   assert.equal(existsSync(new URL('../scripts/account-recovery-inputs.mjs', import.meta.url)), false,
     'the manual recovery input validator is removed');
 });
+
+// #287: the pinned capability value. It is validated before any read, an unusable value is a
+// typed refusal that still writes refused evidence, and the guard runs before every new start.
+const capabilityOperationSource = readFileSync(new URL('../tests/support/service-cleanup-operation.ts', import.meta.url), 'utf8');
+
+test('an unset or malformed pinned value throws and writes refused evidence instead of deferring', async () => {
+  for (const [value, reason] of [[undefined, 'unset'], ['', 'unset'],
+    ['arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:0', 'malformed'],
+    ['arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:live', 'malformed']]) {
+    const directory = await mkdtemp(join(tmpdir(), 'anywear-cleanup-capability-refusal-'));
+    const evidencePath = join(directory, 'operation.json');
+    try {
+      const io = fixture({});
+      await assert.rejects(
+        runCleanupOperation(inputs, { ...environment, BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: value,
+          E2E_SERVICE_CLEANUP_EVIDENCE_PATH: evidencePath }, io),
+        (error) => error instanceof Error && error.name === 'CleanupCapabilityRefusedError'
+          && error.reason === reason && /Cognito identities retained/.test(error.message),
+        `an ${reason} value must refuse`,
+      );
+      const operation = JSON.parse(await readFile(evidencePath, 'utf8')).operation;
+      assert.equal(operation.proof_status, 'refused', `${reason}: the refusal is recorded, not deferred`);
+      assert.equal(operation.refusal_phase, 'operation_start');
+      assert.equal(operation.refusal_category, 'operation_start_unavailable');
+      assert.match(operation.failure, /identities retained/);
+      // Nothing was read or started under an unusable value.
+      assert.deepEqual(io.calls, []);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('no deferred return or silent-warn branch remains on the cleanup path', () => {
+  // The silent defer was `console.warn(...) ... return undefined`. Neither survives, and the
+  // function's declared result can no longer be an absent value.
+  assert.equal(capabilityOperationSource.includes('cleanup deferred'), false);
+  assert.equal(capabilityOperationSource.includes('is not configured'), false);
+  assert.match(capabilityOperationSource,
+    /export async function runCleanupOperation\(inputs: ServiceCleanupInputs, environment: NodeJS\.ProcessEnv = process\.env,\s*\n\s*io\?: CleanupOperationIo, options: CleanupOperationOptions = \{\}\): Promise<CleanupOperationEvidence> \{/);
+  // The only `return undefined` left is the describe-not-found absence read.
+  assert.equal([...capabilityOperationSource.matchAll(/return undefined;/g)].length, 1);
+});
+
+test('the transport submits the pinned value verbatim and performs no CloudFormation read', async () => {
+  for (const [existing, operationOptions] of [[{}, undefined], [{ 0: 'FAILED' }, undefined],
+    [{ 0: 'FAILED', 1: 'FAILED' }, { migrationGeneration: true }]]) {
+    const directory = await mkdtemp(join(tmpdir(), 'anywear-cleanup-pinned-'));
+    const evidencePath = join(directory, 'operation.json');
+    try {
+      const io = fixture({ existing });
+      const evidence = await runCleanupOperation(inputs, { ...environment,
+        E2E_SERVICE_CLEANUP_EVIDENCE_PATH: evidencePath }, io, operationOptions);
+      assert.equal(evidence.operation.proof_status, 'verified');
+      // Every generation records and submits the environment value byte for byte.
+      assert.equal(evidence.operation.state_machine_version_arn, environment.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN);
+      // The read of that value belongs to the entry, not to the transport: the operation never
+      // calls CloudFormation, and the only AWS reads it makes are its own ECS/log evidence.
+      assert.equal(io.calls.some((call) => call.aws?.[0] === 'cloudformation'), false);
+      assert.deepEqual([...new Set(io.calls.filter((call) => call.aws).map((call) => call.aws[0]))].sort(), ['ecs', 'logs']);
+      // Re-read the record from disk: the value is fixed for the run, not recomputed at proof.
+      const operation = JSON.parse(await readFile(evidencePath, 'utf8')).operation;
+      assert.equal(operation.state_machine_version_arn, environment.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+  assert.equal(capabilityOperationSource.includes('describe-stacks'), false,
+    'the operation never reads the publication; the entry resolves and pins it');
+});
+
+test('the start guard runs immediately before every new generation and never before a resume or verify', async () => {
+  /** Drive one operation with a guard that records its position in the transport call log. */
+  const guardedRun = async ({ existing, operationOptions }) => {
+    const directory = await mkdtemp(join(tmpdir(), 'anywear-cleanup-guard-'));
+    const evidencePath = join(directory, 'operation.json');
+    const io = fixture({ existing, completeRunning: true });
+    let guards = 0;
+    const beforeStart = () => { guards += 1; io.calls.push({ guard: guards }); };
+    try {
+      const evidence = await runCleanupOperation(inputs, { ...environment,
+        E2E_SERVICE_CLEANUP_EVIDENCE_PATH: evidencePath }, io, { ...operationOptions, beforeStart });
+      return { evidence, calls: io.calls, guards };
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  };
+
+  // Generation 0: one guard, immediately before the one start.
+  const generation0 = await guardedRun({ existing: {} });
+  assert.equal(generation0.guards, 1);
+  assert.equal(generation0.calls.filter((call) => call.start).length, 1);
+  assert.deepEqual(generation0.calls[generation0.calls.findIndex((call) => call.start) - 1], { guard: 1 });
+
+  // A resume starts nothing: a RUNNING generation 0 is observed, never re-started, so the guard
+  // is not run.
+  const resumed = await guardedRun({ existing: { 0: 'RUNNING' } });
+  assert.equal(resumed.guards, 0);
+  assert.equal(resumed.calls.some((call) => call.start), false);
+
+  // A verify starts nothing either: a SUCCEEDED generation 0 is proved from its own describe.
+  const verified = await guardedRun({ existing: { 0: 'SUCCEEDED' } });
+  assert.equal(verified.guards, 0);
+  assert.equal(verified.calls.some((call) => call.start), false);
+
+  // The retry: generation 0 already exists and failed, so the one new start is `-retry1`, and
+  // the guard runs immediately before it.
+  const retry = await guardedRun({ existing: { 0: 'FAILED' } });
+  assert.equal(retry.guards, 1);
+  const retryStarts = retry.calls.map((call, index) => ({ call, index })).filter((entry) => entry.call.start);
+  assert.equal(retryStarts.length, 1);
+  assert.equal(retryStarts[0].call.start, name1);
+  assert.deepEqual(retry.calls[retryStarts[0].index - 1], { guard: 1 });
+
+  // The migration generation: both ordinary generations already exist and failed, so the one new
+  // start is `-migration1`, guarded like the other two.
+  const migration = await guardedRun({ existing: { 0: 'FAILED', 1: 'FAILED' }, operationOptions: migrationOptions });
+  assert.equal(migration.guards, 1);
+  const migrationStart = migration.calls.findIndex((call) => call.start === migrationName);
+  assert.ok(migrationStart > 0, 'the migration generation was started');
+  assert.deepEqual(migration.calls[migrationStart - 1], { guard: 1 });
+});
+
+test('a refusing start guard starts nothing and records the refusal at operation_start', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'anywear-cleanup-guard-refusal-'));
+  const evidencePath = join(directory, 'operation.json');
+  try {
+    const io = fixture({ existing: { 0: 'FAILED' } });
+    const refusal = new Error('Cleanup capability version refused (drift)');
+    await assert.rejects(
+      runCleanupOperation(inputs, { ...environment, E2E_SERVICE_CLEANUP_EVIDENCE_PATH: evidencePath }, io,
+        { beforeStart: () => { throw refusal; } }),
+      /identities retained/,
+    );
+    // The guard refused generation 0's start, so nothing was started at all: no generation 0, and
+    // no retry that would have needed a terminal predecessor.
+    assert.equal(io.calls.some((call) => call.start), false);
+    const operation = JSON.parse(await readFile(evidencePath, 'utf8')).operation;
+    assert.equal(operation.proof_status, 'refused');
+    assert.equal(operation.refusal_phase, 'operation_start');
+    assert.equal(operation.refusal_category, 'operation_start_unavailable');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

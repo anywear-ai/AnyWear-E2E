@@ -12,6 +12,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { ghApi } from './github-read.mjs';
 import { assertE2EExecution } from './execution-guard.mjs';
+import { cleanupStartGuard } from './cleanup-capability.mjs';
 import { byteHash, parseStrictJson, repositories } from './evidence-contract.mjs';
 import { runCleanupOperation } from '../tests/support/service-cleanup-operation.ts';
 import { isCapturedBetaWorkerEmail, STABLE_WORKER_EMAIL_PATTERN } from '../tests/support/beta-address.ts';
@@ -1736,8 +1737,9 @@ function extractLifecycleArchive(archivePath, reader = LIFECYCLE_ARCHIVE_READER)
 
 // The production transports. They are the only places that touch GitHub, AWS or the Service
 // cleanup capability; the tests inject the same interface instead. `cleanupIo` is the test seam
-// for the real `runCleanupOperation` transport; production always leaves it undefined.
-export function createReconcileIo(environment = process.env, { cleanupIo } = {}) {
+// for the real `runCleanupOperation` transport and `capabilityIo` the one for the cleanup
+// capability read (#287); production always leaves both undefined.
+export function createReconcileIo(environment = process.env, { cleanupIo, capabilityIo } = {}) {
   const repository = repositories.e2e;
   const userPoolId = environment.USER_POOL_ID;
   if (!userPoolId) throw new Error('USER_POOL_ID is required to read the Beta pool');
@@ -1833,10 +1835,12 @@ export function createReconcileIo(environment = process.env, { cleanupIo } = {})
       // The migration allowance reaches the cleanup only when the recorded window is the
       // 90-day retention; every other dispatch leaves the key absent (#217). The durable
       // witness lookup is the reconcile's own source (#224); every other caller passes none.
+      // #287: every new execution start re-checks that the pinned version ARN is still the one
+      // the deployment publishes; the pin itself is never resolved again here.
       const evidence = await runCleanupOperation(inputs, cleanupEnvironment, cleanupIo,
         { deadline, ...(migrationGeneration === true ? { migrationGeneration: true } : {}),
-          ...(typeof recovery === 'function' ? { recovery } : {}) });
-      if (!evidence) return undefined;
+          ...(typeof recovery === 'function' ? { recovery } : {}),
+          beforeStart: cleanupStartGuard({ environment: cleanupEnvironment, io: capabilityIo }) });
       const operation = evidence.operation ?? {};
       return { proof_status: operation.proof_status, committed_result: operation.committed_result };
     },

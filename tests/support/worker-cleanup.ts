@@ -250,7 +250,12 @@ export function workerLeaseGateError(disposition: WorkerLeaseDisposition): Error
 }
 
 const RUN_SCOPE_PATTERN = /^[1-9][0-9]{0,19}-[1-9][0-9]{0,5}-[a-f0-9]{16}$/;
-const SUBJECT_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+/**
+ * A captured Cognito subject, the immutable identity the cleanup request binds (#287). The
+ * teardown reads the same grammar to tell a lease that captured an identity — which may be
+ * retained — from one that never created anything.
+ */
+export const SUBJECT_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
 /**
  * One eligibility rule for the cleanup request and the ledger transition.
