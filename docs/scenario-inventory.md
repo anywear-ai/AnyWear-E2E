@@ -1,7 +1,7 @@
 # Scenario inventory
 
 This inventory is the per-scenario classification the [testing principles and execution
-policy](https://github.com/git-malu/AnyWear-Meta/blob/main/architecture/system-component-architecture/technical-architecture/devops/test/test_governance.md)
+policy](https://github.com/anywear-ai/AnyWear-Meta/blob/main/architecture/system-component-architecture/technical-architecture/devops/test/test_governance.md)
 requires in place of tags alone. It records, for every tracked deployed scenario, the
 governance class that policy defines, the claim it asserts, the invocation that selects
 it, the cleanup contract that disposes of what it creates, and the verdict a red result
@@ -197,7 +197,7 @@ Git history and its original acceptance evidence stays in the immutable run arti
 ## Admission rule
 
 The [testing policy
-admission rule](https://github.com/git-malu/AnyWear-Meta/blob/main/architecture/system-component-architecture/technical-architecture/devops/test/test_governance.md)
+admission rule](https://github.com/anywear-ai/AnyWear-Meta/blob/main/architecture/system-component-architecture/technical-architecture/devops/test/test_governance.md)
 governs whether a new deployed scenario is admitted, and this document does not restate it:
 the policy is its single normative statement, so that a reader has one wording to rely on
 rather than two that can drift apart.
