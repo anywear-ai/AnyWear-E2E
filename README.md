@@ -437,9 +437,15 @@ does not serialize those other repositories. Keep `ENABLE_BETA_MUTATION` unset o
 | `E2E_CLEANUP_SERVICE_SOURCE_SHA` | Full reviewed deployed Service source SHA bound into the fixed cleanup capability |
 | `E2E_CLEANUP_SERVICE_SHA` | Legacy source/operator guard value retained during cutover |
 | `E2E_CLEANUP_SERVICE_IMAGE_DIGEST` | Reviewed deployed Service image digest |
-| `BETA_CLEANUP_STATE_MACHINE_VERSION_ARN` | Immutable version ARN of the Infra-owned cleanup state machine |
 | `E2E_WORKER_SLOT_OFFSET` | Allocated first slot, integer 0 through 7; the selected workers must fit within slots 0 through 7 |
 | `AWS_ACCOUNT_ID`, `AWS_REGION` | `650880818323`, `ap-east-1` |
+
+The cleanup capability version is not configured here. `scripts/cleanup-capability.mjs resolve`
+reads the version ARN `AnyWearRuntimeStack-beta` publishes as a stack output at run time, pins it
+for the job and appends the value and the output it came from to the run's step summary; the
+`full`, `smoke` and `reconcile` entries all take the value from that one read, and each re-checks
+it against the deployment before the first account or deletion and again before every new cleanup
+execution. The former `BETA_CLEANUP_STATE_MACHINE_VERSION_ARN` repository variable is retired.
 
 The protected Beta environment, exact repository/owner IDs, main workflow dispatch,
 the single `qualify` entry and the explicitly stated `operation` establish source

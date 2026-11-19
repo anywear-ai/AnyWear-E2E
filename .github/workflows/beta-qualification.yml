@@ -368,7 +368,6 @@ jobs:
       E2E_OPERATION: ${{ inputs.operation }}
       ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
       E2E_CLEANUP_SERVICE_SHA: ${{ vars.E2E_CLEANUP_SERVICE_SHA }}
-      BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: ${{ vars.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN }}
       # The reviewed lookback and the job's own deadline. An ordinary reconcile stops starting
       # work at 720 seconds inside a 15-minute job; the one migration dispatch stops at 1500
       # seconds inside a 30-minute job, and the remaining deadline is passed into every cleanup
@@ -424,10 +423,18 @@ jobs:
       # The cleanup envelope must name the Service release the cleanup capability was
       # deployed with, so the live tuple supplies the source/image pair. A qualification run
       # has already observed it; this job reads it once for its own envelope.
+      #
+      # #287: the cleanup capability version ARN is read from the deployment here, once for
+      # this job, and pinned in the job environment. The read is the same step that fixes the
+      # envelope's Service identity, and nothing re-resolves it later: the reconcile pass uses
+      # the pin, and the `gate` before its first deletion compares the pin with the publication
+      # read at that moment. The command substitution is the command, so a refused resolve fails
+      # this step before any identity is deleted.
       - name: Load the Beta pool and the live cleanup identity
         env:
           QUALIFICATION_EVIDENCE_PATH: reconcile/deployment-evidence.json
         run: |
+          version_arn=$(node scripts/cleanup-capability.mjs resolve)
           mkdir -p reconcile
           pool_id=$(aws ssm get-parameter --name /anywear/beta/cognito_user_pool_id --query Parameter.Value --output text)
           pnpm qualification:collect
@@ -435,6 +442,7 @@ jobs:
             echo "USER_POOL_ID=$pool_id"
             echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$(jq -r '.service.service_commit' reconcile/deployment-evidence.json)"
             echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$(jq -r '.service.image_digest' reconcile/deployment-evidence.json)"
+            echo "BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=$version_arn"
           } >> "$GITHUB_ENV"
 
       - name: Reconcile recent E2E leftover identities
@@ -442,6 +450,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           node scripts/execution-guard.mjs
+          node scripts/cleanup-capability.mjs gate
           node scripts/reconcile-accounts.mjs
 
       - name: Upload the reconcile record
@@ -476,7 +485,6 @@ jobs:
       E2E_EXTERNAL_SERVERS: true
       ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
       E2E_CLEANUP_SERVICE_SHA: ${{ vars.E2E_CLEANUP_SERVICE_SHA }}
-      BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: ${{ vars.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN }}
       CLEANUP_MACHINE_AUTH_SECRET: ${{ secrets.CLEANUP_MACHINE_AUTH_SECRET }}
       E2E_WORKERS: 2
       E2E_WORKER_SLOT_OFFSET: ${{ inputs.worker_slot_offset }}
@@ -570,9 +578,14 @@ jobs:
           QUALIFICATION_EVIDENCE_PATH: deployment-evidence-before.json
         run: pnpm qualification:collect
 
+      # #287: this step fixes the cleanup envelope's Service identity *and* pins the cleanup
+      # capability version ARN the deployment publishes. One resolve per job, here; the teardown
+      # uses the pin and never resolves it again. The command substitution is the command, so a
+      # refused resolve fails the step before the suite creates its first test account.
       - name: Load Beta test identity configuration
         shell: bash
         run: |
+          version_arn=$(node scripts/cleanup-capability.mjs resolve)
           pool_id=$(aws ssm get-parameter --name /anywear/beta/cognito_user_pool_id --query Parameter.Value --output text)
           client_id=$(aws ssm get-parameter --name /anywear/beta/cognito_client_id --query Parameter.Value --output text)
           {
@@ -581,6 +594,7 @@ jobs:
             echo "VITE_COGNITO_CLIENT_ID=$client_id"
             echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$(jq -r '.service.image_digest' deployment-evidence-before.json)"
             echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$(jq -r '.service.service_commit' deployment-evidence-before.json)"
+            echo "BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=$version_arn"
           } >> "$GITHUB_ENV"
 
       - name: Set unique cleanup run scope
@@ -603,6 +617,7 @@ jobs:
         id: beta-suite
         run: |
           node scripts/execution-guard.mjs
+          node scripts/cleanup-capability.mjs gate
           pnpm test
 
       - name: Capture Beta worker identity after the suite
@@ -782,7 +797,6 @@ jobs:
       E2E_EXTERNAL_SERVERS: true
       ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
       E2E_CLEANUP_SERVICE_SHA: ${{ vars.E2E_CLEANUP_SERVICE_SHA }}
-      BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: ${{ vars.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN }}
       CLEANUP_MACHINE_AUTH_SECRET: ${{ secrets.CLEANUP_MACHINE_AUTH_SECRET }}
       E2E_WORKERS: 2
       E2E_WORKER_SLOT_OFFSET: ${{ inputs.worker_slot_offset }}
@@ -874,9 +888,14 @@ jobs:
             echo "Minimum Client $(jq -r '.service.minimum_client_version' .qualification-inputs/live-identity.json)"
           } | tee tested-revisions.txt
 
+      # #287: this step fixes the cleanup envelope's Service identity *and* pins the cleanup
+      # capability version ARN the deployment publishes. One resolve per job, here; the teardown
+      # uses the pin and never resolves it again. The command substitution is the command, so a
+      # refused resolve fails the step before the smoke suite creates its first test account.
       - name: Load Beta test identity configuration
         shell: bash
         run: |
+          version_arn=$(node scripts/cleanup-capability.mjs resolve)
           pool_id=$(aws ssm get-parameter --name /anywear/beta/cognito_user_pool_id --query Parameter.Value --output text)
           client_id=$(aws ssm get-parameter --name /anywear/beta/cognito_client_id --query Parameter.Value --output text)
           {
@@ -885,6 +904,7 @@ jobs:
             echo "VITE_COGNITO_CLIENT_ID=$client_id"
             echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$(jq -r '.service.image_digest' deployment-evidence-before.json)"
             echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$(jq -r '.service.service_commit' deployment-evidence-before.json)"
+            echo "BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=$version_arn"
           } >> "$GITHUB_ENV"
 
       - name: Set unique cleanup run scope
@@ -900,6 +920,7 @@ jobs:
         id: beta-smoke-suite
         run: |
           node scripts/execution-guard.mjs
+          node scripts/cleanup-capability.mjs gate
           pnpm test:smoke
 
       - name: Clean up exact Beta worker identities

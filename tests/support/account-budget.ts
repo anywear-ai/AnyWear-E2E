@@ -362,3 +362,54 @@ export async function retainAccount(email: string, reason: string): Promise<void
     account.updatedAt = now();
   });
 }
+
+/**
+ * Retain exactly one captured identity that a cleanup attempted (#287).
+ *
+ * `retainAccount` resolves the latest record by email, which for a reused pool address can be a
+ * newer lease than the one whose identity the cleanup was asked to delete: the older record
+ * would stay `cleanup_pending` and the newer, live lease would be retained under a reason that
+ * belongs to a different attempt. This write resolves by the captured pair instead — the pool
+ * address **and** the Cognito subject the request bound — so it can only land on the record of
+ * the identity that was actually attempted.
+ *
+ * The bound is anchored to that record's own `createdAt`, never to the instant of this write, so
+ * it states when the creating run's leftover became late. A `deleted` record is never
+ * resurrected; a record that cannot be found — a lease that captured no identity — is left
+ * untouched and reported as not written, so "created and not deleted" stays distinguishable
+ * from "never created". Returns whether a record was written.
+ */
+export async function retainAttemptedAccount(
+  identity: { email: string; subject?: string },
+  reason: string,
+): Promise<boolean> {
+  if (typeof identity?.email !== 'string' || typeof identity?.subject !== 'string') return false;
+  const subject = identity.subject.toLowerCase();
+  let written = false;
+  await withLockedState(async (state) => {
+    const account = attemptedAccountRecord(state, identity.email, subject);
+    if (!account) return;
+    account.status = 'retained';
+    account.retainedReason = reason;
+    account.reconcileBy = new Date(Date.parse(account.createdAt) + RECONCILE_BOUND_MS).toISOString();
+    account.updatedAt = now();
+    written = true;
+  });
+  return written;
+}
+
+/**
+ * The record of one attempted identity: the newest entry for the captured address **and** the
+ * captured subject. A subject guard is what makes a reused pool address safe — the newer lease
+ * carries a different subject and is never selected.
+ */
+function attemptedAccountRecord(state: AccountBudgetState, email: string, subject: string): AccountRecord | undefined {
+  for (let index = state.accounts.length - 1; index >= 0; index -= 1) {
+    const account = state.accounts[index];
+    if (account.email !== email) continue;
+    if (typeof account.subject !== 'string' || account.subject.toLowerCase() !== subject) continue;
+    if (account.status === 'deleted') return undefined;
+    return account;
+  }
+  return undefined;
+}

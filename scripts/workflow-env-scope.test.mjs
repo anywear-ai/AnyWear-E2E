@@ -203,6 +203,33 @@ test('preflight is environment-free and its effective env resolves at repository
   }
 });
 
+test('the cleanup capability version is read from the deployment, never from a repository variable', () => {
+  // #287: the value is the one `AnyWearRuntimeStack-beta` publishes. A workflow or a shipped
+  // script that read it back from a repository variable would reintroduce exactly the stale copy
+  // the issue removed, so the read is refused here.
+  const readVariable = /\$\{\{\s*vars\.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN\s*\}\}/;
+  for (const file of files) {
+    assert.doesNotMatch(read(file), readVariable, `${file} must not read the retired repository variable`);
+    assert.doesNotMatch(read(file), /BETA_CLEANUP_STATE_MACHINE_VERSION_ARN:\s*\$\{\{/,
+      `${file} must not declare the capability version from a workflow expression`);
+  }
+  const scripts = readdirSync(join(repositoryRoot, 'scripts'))
+    .filter((name) => /\.mjs$/.test(name) && !/\.test\.mjs$/.test(name)).sort();
+  assert.ok(scripts.includes('cleanup-capability.mjs'), 'the one resolver must exist');
+  for (const name of scripts) {
+    const text = readFileSync(join(repositoryRoot, 'scripts', name), 'utf8');
+    assert.doesNotMatch(text, readVariable, `scripts/${name} must not read the retired repository variable`);
+    assert.doesNotMatch(text, /actions\/variables|gh variable get/,
+      `scripts/${name} must not reach the repository-variable API`);
+  }
+  // Only the resolver's own job step writes the name, and it writes the value it just read.
+  for (const name of files) {
+    for (const match of read(name).matchAll(/BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=("?)([^\s"]*)\1/g)) {
+      assert.equal(match[2], '$version_arn', `${name} must set the capability version only from the resolved value`);
+    }
+  }
+});
+
 test('every job that invokes gh release verify declares attestations: read', () => {
   // Vacuous today: no step in this repository runs `gh release verify`. The pin is generic
   // so the first step that does must declare the attestation read scope.

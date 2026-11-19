@@ -7,6 +7,8 @@
 //
 // - the stage path `/anywear/beta/` the stage base publishes under;
 // - the `AnyWear` stack-name prefix;
+// - the one stack whose publication the qualification reads for the cleanup capability
+//   version ARN (`AnyWearRuntimeStack-beta`, #287);
 // - the `beta-anywear-` queue-name prefix, which is also the prefix of the Service-built
 //   Lambda function names;
 // - the account identity, carried by the qualification credential: read from the
@@ -20,6 +22,11 @@
 // contains exactly these identifiers and nothing else.
 export const STAGE_PATH = '/anywear/beta/';
 export const STACK_NAME_PREFIX = 'AnyWear';
+// #287: the one stack the infrastructure repository publishes the cleanup capability version
+// ARN from. The qualification reads only this stack's outputs, so the version is the
+// deployment's own statement rather than a copy held in either repository. The stack name
+// describes a deployment, not a revision: no version number or version ARN is committed here.
+export const RUNTIME_STACK_NAME = 'AnyWearRuntimeStack-beta';
 export const QUEUE_NAME_PREFIX = 'beta-anywear-';
 export const CREDENTIAL_REGION = 'ap-east-1';
 export const BILLING_REGION = 'us-east-1';
