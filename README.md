@@ -133,7 +133,7 @@ filter, so that job now runs on every check rather than only on its former path 
 cost is recorded in the PR body for #163. Both jobs have only `contents: read` and no
 deployment environment or credential steps. SQS prototypes are excluded from both routine
 core and tool checks and retain their [source-only handoff](scripts/beta-sqs-boundary-handoff.md).
-The accepted [testing principles](https://github.com/git-malu/AnyWear-Meta/blob/main/architecture/system-component-architecture/technical-architecture/devops/test/test_governance.md)
+The accepted [testing principles](https://github.com/anywear-ai/AnyWear-Meta/blob/main/architecture/system-component-architecture/technical-architecture/devops/test/test_governance.md)
 define the classification, cost, evidence, admission and retirement policy this
 repository applies.
 
