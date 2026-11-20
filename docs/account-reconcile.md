@@ -2,9 +2,12 @@
 
 The `reconcile` operation of the protected `beta-qualification.yml` entry bounds E2E leftover
 data by time instead of by an operator (#217). It runs as a job before every `qualify` suite
-and daily through `reconcile-schedule.yml`, which dispatches `operation=reconcile` with
-`trigger=scheduled` through the same protected `workflow_dispatch` entry: the execution guard
-requires that event, so a `schedule` event on the qualify entry would fail closed.
+and daily through `AnyWear-Infra`'s scheduled entry (`schedule.yml`), which dispatches
+`operation=reconcile` with `trigger=scheduled` through the same protected `workflow_dispatch`
+entry: the execution guard requires that event, so a `schedule` event on the qualify entry
+would fail closed. E2E keeps no schedule entry of its own (#344): the daily dispatch has one
+starter, in the writer repository, and the dispatched run is still the E2E run that holds the
+Beta credential.
 
 There is no manual repair step and no attempt or predecessor chain to supply. A teardown that
 cannot prove deletion records the identity `retained` with a reason and a `reconcileBy` bound

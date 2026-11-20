@@ -12,9 +12,11 @@ const sourceRoot = fileURLToPath(new URL('..', import.meta.url));
 // allow-list used to be.
 //
 // #217: `reconcile` runs as a job of every qualification (before its suite) and as its own
-// dispatched operation from the daily schedule. Both go through the same entry, so both
-// carry `workflow_dispatch` and the exact protected workflow ref this guard requires. The
-// manual `recover` operation was removed with the same change.
+// dispatched operation from `AnyWear-Infra`'s daily scheduled entry (#344 moved the daily
+// dispatch into the writer repository, which is now the only starter of this entry's
+// automated runs). Both go through the same entry, so both carry `workflow_dispatch` and the
+// exact protected workflow ref this guard requires. The manual `recover` operation was
+// removed with the same change.
 export const E2E_OPERATIONS = Object.freeze(['full', 'smoke', 'reconcile']);
 const operationEntries = Object.freeze({
   full: 'beta-qualification',

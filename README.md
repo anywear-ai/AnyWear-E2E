@@ -101,11 +101,12 @@ verdict each invocation carries.
 
 `reconcile` runs twice: as a job before every qualification suite, so a run starts from a
 reconciled environment, and as a daily dispatch of the same protected `workflow_dispatch`
-entry from `reconcile-schedule.yml` (`trigger=scheduled`). The scheduled file only dispatches
-— the execution guard requires `workflow_dispatch`, so a `schedule` event on the qualify entry
-would fail closed — and the dispatched run is what joins the `beta-e2e-account-pool`
-concurrency group and holds the Beta credential. Its runbook is
-[docs/account-reconcile.md](docs/account-reconcile.md).
+entry by `AnyWear-Infra`'s scheduled entry (`schedule.yml`, `trigger=scheduled`). That entry
+only dispatches — the execution guard requires `workflow_dispatch`, so a `schedule` event on
+the qualify entry would fail closed — and the dispatched run is what joins the
+`beta-e2e-account-pool` concurrency group and holds the Beta credential. This repository
+keeps no schedule entry of its own: the daily dispatch has one starter, in the writer
+repository. Its runbook is [docs/account-reconcile.md](docs/account-reconcile.md).
 
 The registered core files retain account-budget, Cognito cleanup, qualification
 record, cleanup operation, wardrobe cleanup, worker cleanup, account reconcile and
@@ -115,7 +116,7 @@ declaration contracts plus the v4 live-tuple contracts: `qualification-record.te
 (this repository's own platform observation, the record's self-containment and its release
 consumer), `service-release.test.mjs` (the immutable Service release identity, the
 four-asset gate, the five-asset transition and the no-asset-read rule), and
-`entry-census.test.mjs`, which asserts the three-entry face, the one manual dispatch surface,
+`entry-census.test.mjs`, which asserts the two-entry face, the one manual dispatch surface,
 the credential ordering, the absence of an approval job and the single
 `ENABLE_BETA_MUTATION` name. `test:core` also owns
 `scripts/reconcile-accounts.test.mjs`, which asserts the reconcile diff, the captured address
@@ -140,7 +141,7 @@ repository applies.
 ## Execution Policy
 
 Pull requests do not run cross-repository browser E2E as a required check. The E2E
-Check entry runs the explicit 23 core test files,
+Check entry runs the explicitly registered core test files,
 the credential-free tool regressions, lint, type checking, and Playwright test discovery. Client and Service workflows remain responsible for their
 required unit, repository integration, contract, database, and browser integration tests.
 
@@ -206,9 +207,17 @@ dispatch also carries
 `expected_service_commit` and `expected_client_commit` (`full` only), `trigger` (`manual`,
 `deploy-smoke` for the deployment smoke hook, `deploy-qualify` for the deploy chain's
 qualification, `release-qualify` for a deliberate human re-qualification, `scheduled` for the
-daily reconcile dispatch) and
+daily reconcile dispatch from `AnyWear-Infra`'s scheduled entry) and
 `dispatched_by` (the dispatching run URL; non-manual triggers only), and the credential-free
-preflight validates that combination before any credential job. Each run is named
+preflight validates that combination before any credential job. For an operator dispatch
+(`trigger=manual`, all three operations, or `trigger=release-qualify`) the preflight also
+performs the outbound writer admission (#344): it lists the nonterminal `AnyWear-Infra` writer
+runs (`mutate.yml` and the scheduled entry) through a read-only `AnyWear-Infra` App token and
+refuses only when a foreign run's hold job (`qualify-hold` or `hold`) is still nonterminal,
+failing open with a warning when a list cannot be read; a dispatch that names its own writer
+run in `dispatched_by` is admitted by that same comparison. The automated dispatches
+(`deploy-qualify`, `deploy-smoke`, `scheduled`) are started by the writer inside its held run
+and skip the read, so they cannot be refused by a queued writer. Each run is named
 `Beta qualification: <operation> · <trigger> · <expected Service commit or -> · by <dispatched_by or @actor>`,
 and the release chain finds the qualification record of a Service commit by that name. The `full` operation is the
 production-readiness gate for an already-deployed Beta environment. It reads the live Client
