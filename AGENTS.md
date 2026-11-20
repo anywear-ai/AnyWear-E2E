@@ -146,15 +146,18 @@ Run install and build commands from this repository.
   historical manifest recording `quarantined` reads as `retained`. `retained` consumes no
   active-account budget, while its own address stays out of the pool until the identity is
   deleted; `maxNewAccountsPerRun` still counts every attempt.
-- A qualification is admitted only when no `AnyWear-Infra` writer is holding the served tuple
-  (#344). The credential-free preflight mints one read-only `AnyWear-Infra` App token
-  (`actions: read` only), lists the nonterminal `mutate.yml` and scheduled-entry runs across
-  `requested`, `waiting`, `pending`, `queued` and `in_progress` in
+- A qualification an operator dispatches is admitted only when no `AnyWear-Infra` writer is
+  holding the served tuple (#344). For `trigger=manual` (all three operations) and
+  `trigger=release-qualify`, the credential-free preflight mints one read-only
+  `AnyWear-Infra` App token (`actions: read` only), lists the nonterminal `mutate.yml` and
+  scheduled-entry runs across `requested`, `waiting`, `pending`, `queued` and `in_progress` in
   `scripts/writer-admission.mjs`, and refuses only when a successfully read list names a run
   that is not this dispatch's `dispatched_by` while that run's hold job (`qualify-hold` for
   `mutate.yml`, `hold` for the scheduled entry) is nonterminal. An unreadable list warns and
-  admits. The deploying run's own `full` is admitted by construction, because its
-  `dispatched_by` names the run that is holding it; do not add a second exemption path.
+  admits. The automated dispatches (`deploy-qualify`, `deploy-smoke`, `scheduled`) run inside
+  the writer's held run and skip the read, so a queued writer cannot refuse them. A dispatch
+  that names its own writer run in `dispatched_by` is admitted by that same one comparison;
+  do not add a second exemption path.
 - Attribution follows the creator, not the address (#217). Every protected credential step
   assumes `beta-e2e-qualification-role` with
   `role-session-name: e2e-${{ github.run_id }}-${{ github.run_attempt }}`, and

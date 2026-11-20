@@ -308,16 +308,20 @@ jobs:
       - name: Require protected execution
         run: node scripts/execution-guard.mjs --source-only
 
-      # #344: the outbound half of the writer/starter pair. `AnyWear-Infra` is the single
-      # writer of the served tuple and the single starter of automated qualifications, so a
-      # qualification a human starts is admitted only when no Infra writer run is holding the
-      # tuple. The automated dispatches are admitted by construction, because the run that is
-      # holding them is the run their `dispatched_by` names. The read is credential-free for
-      # AWS: it mints one read-only App token for `AnyWear-Infra` (`actions: read` only),
-      # declares no `environment` and requests no OIDC permission, so it belongs here, ahead of
-      # every credential job.
+      # #344: the outbound half of the writer/starter pair, for the operator entry only. An
+      # operator keeps the direct dispatch of this workflow — `trigger=manual` for all three
+      # operations and `release-qualify` for a deliberate re-qualification — and that dispatch
+      # is admitted only when no `AnyWear-Infra` writer run is holding the served tuple. The
+      # automated dispatches are the writer's own children (`deploy-qualify` for the deploy
+      # chain's `full`, `deploy-smoke`, and the daily `scheduled` reconcile), so the gate below
+      # skips the read entirely for them instead of letting a queued foreign writer refuse a
+      # starter that runs inside the writer's held run. The read is credential-free for AWS: it
+      # mints one read-only App token for `AnyWear-Infra` (`actions: read` only), declares no
+      # `environment` and requests no OIDC permission, so it belongs here, ahead of every
+      # credential job.
       - name: Generate Infra writer read token
         id: infra-writer-token
+        if: inputs.trigger == 'manual' || inputs.trigger == 'release-qualify'
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ vars.APP_ID }}
@@ -331,6 +335,7 @@ jobs:
       # `mutate.yml`, `hold` for the scheduled entry) is nonterminal. An unreadable list warns
       # and admits, so a failing writer cannot lock the operator out of diagnosing it.
       - name: Admit this qualification only when no Infra writer holds the tuple
+        if: inputs.trigger == 'manual' || inputs.trigger == 'release-qualify'
         env:
           GH_TOKEN: ${{ steps.infra-writer-token.outputs.token }}
           DISPATCHED_BY: ${{ inputs.dispatched_by }}

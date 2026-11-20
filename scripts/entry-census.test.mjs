@@ -66,6 +66,19 @@ const REMOVED_SCHEDULE_ENTRY = 'reconcile-schedule.yml';
 const REMOVED_SCHEDULE_TOKENS = Object.freeze(['reconcile-schedule']);
 const CENSUS = 'scripts/entry-census.test.mjs';
 
+// #344: the admission gate as the workflow states it — a disjunction of
+// `inputs.trigger == '<value>'` clauses. Reading it as a set lets a test ask which dispatch
+// triggers reach the read, rather than only pinning the expression as a string.
+function admittedTriggers(expression) {
+  const triggers = new Set();
+  for (const clause of expression.split('||').map((part) => part.trim())) {
+    const match = /^inputs\.trigger == '([a-z-]+)'$/.exec(clause);
+    assert.ok(match, `the admission gate clause ${JSON.stringify(clause)} must compare inputs.trigger`);
+    triggers.add(match[1]);
+  }
+  return triggers;
+}
+
 function inputBlock(name) {
   const start = qualify.indexOf(`\n      ${name}:\n`);
   assert.ok(start >= 0, `${name} must be a workflow input`);
@@ -413,10 +426,30 @@ test('the preflight admits a qualification through one credential-free outbound 
   const admission = stepSection(preflight, 'Admit this qualification only when no Infra writer holds the tuple');
   assert.match(admission, /GH_TOKEN: \$\{\{ steps\.infra-writer-token\.outputs\.token \}\}/);
   assert.match(admission, /DISPATCHED_BY: \$\{\{ inputs\.dispatched_by \}\}/);
-  // One declared command, and one exemption input: the deploying run's own `full` is admitted
-  // by construction because its `dispatched_by` names the run that holds it.
+  // One declared command, and one input: the rule's only exemption is the dispatch's
+  // `dispatched_by` matching a candidate run — there is no second exemption flag.
   assert.deepEqual(admission.split('\n').map((line) => line.trim()).filter((line) => line.startsWith('run: ')),
     ['run: node scripts/writer-admission.mjs --dispatched-by "$DISPATCHED_BY"']);
+
+  // #344 review: the read belongs to the operator entry. `manual` is the human dispatch of all
+  // three operations and `release-qualify` the human re-qualification; the automated
+  // dispatches are the writer's own children, so the gate skips the read entirely for them
+  // instead of letting a queued foreign writer refuse them. Both steps carry the same gate, so
+  // an automated dispatch mints no token either.
+  const gate = /^ {8}if: (.+)$/m.exec(admission)?.[1] ?? '';
+  assert.equal(gate, "inputs.trigger == 'manual' || inputs.trigger == 'release-qualify'",
+    'the admission must be gated on the operator triggers');
+  assert.equal(/^ {8}if: (.+)$/m.exec(token)?.[1] ?? '', gate, 'the token mint must carry the admission gate');
+
+  const gated = admittedTriggers(gate);
+  assert.deepEqual([...gated].sort(), ['manual', 'release-qualify'],
+    'only the operator dispatch triggers may reach the admission read');
+  // The deploy chain's `full` (`operation=full`, `trigger=deploy-qualify`), the deployment
+  // smoke and the daily reconcile are automated: they do not run the admission, so they
+  // cannot be refused by a queued foreign writer.
+  for (const automated of ['deploy-qualify', 'deploy-smoke', 'scheduled']) {
+    assert.equal(gated.has(automated), false, `trigger ${automated} must skip the admission read`);
+  }
 
   // The step sits after the source and operation-scope checks and before the Service read, so
   // it precedes every job that can hold an AWS credential; it declares no environment and no

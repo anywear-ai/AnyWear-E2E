@@ -209,12 +209,15 @@ dispatch also carries
 qualification, `release-qualify` for a deliberate human re-qualification, `scheduled` for the
 daily reconcile dispatch from `AnyWear-Infra`'s scheduled entry) and
 `dispatched_by` (the dispatching run URL; non-manual triggers only), and the credential-free
-preflight validates that combination before any credential job. The preflight also performs
-the outbound writer admission (#344): it lists the nonterminal `AnyWear-Infra` writer runs
-(`mutate.yml` and the scheduled entry) through a read-only `AnyWear-Infra` App token and
+preflight validates that combination before any credential job. For an operator dispatch
+(`trigger=manual`, all three operations, or `trigger=release-qualify`) the preflight also
+performs the outbound writer admission (#344): it lists the nonterminal `AnyWear-Infra` writer
+runs (`mutate.yml` and the scheduled entry) through a read-only `AnyWear-Infra` App token and
 refuses only when a foreign run's hold job (`qualify-hold` or `hold`) is still nonterminal,
-failing open with a warning when a list cannot be read; the run a dispatch names in
-`dispatched_by` is admitted by construction, because that run is holding it. Each run is named
+failing open with a warning when a list cannot be read; a dispatch that names its own writer
+run in `dispatched_by` is admitted by that same comparison. The automated dispatches
+(`deploy-qualify`, `deploy-smoke`, `scheduled`) are started by the writer inside its held run
+and skip the read, so they cannot be refused by a queued writer. Each run is named
 `Beta qualification: <operation> · <trigger> · <expected Service commit or -> · by <dispatched_by or @actor>`,
 and the release chain finds the qualification record of a Service commit by that name. The `full` operation is the
 production-readiness gate for an already-deployed Beta environment. It reads the live Client

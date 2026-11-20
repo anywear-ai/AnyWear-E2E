@@ -2,10 +2,11 @@ import { pathToFileURL } from 'node:url';
 import { parseStrictJson, repositories, requireId } from './evidence-contract.mjs';
 import { ghApi, repositoryReadEnvironment } from './github-read.mjs';
 
-// #344: the outbound half of the writer/starter pair. `AnyWear-Infra` is the single writer of
-// Beta's served tuple and the single starter of automated qualifications, so a qualification
-// that a human starts is admitted only when no Infra writer run is holding the tuple. The
-// admission rule has one exact condition:
+// #344: the outbound half of the writer/starter pair, for the operator entry only.
+// `AnyWear-Infra` is the single writer of Beta's served tuple and the single starter of
+// automated qualifications, so the qualification an operator dispatches directly is admitted
+// only when no Infra writer run is holding the tuple. The admission rule has one exact
+// condition:
 //
 //   refuse only when a *successfully read* list of nonterminal Infra writer runs names a run
 //   that is not the run in this dispatch's `dispatched_by`, while that run's hold job is
@@ -13,11 +14,17 @@ import { ghApi, repositoryReadEnvironment } from './github-read.mjs';
 //
 // Everything else admits, and an unreadable list records a warning and admits: an operator
 // diagnosing a failing writer must not be locked out by the failure of the writer under
-// diagnosis. The automated dispatches are admitted by construction rather than by a second
-// exemption path, because the Infra run that holds them is the run their `dispatched_by`
-// names: `mutate.yml`'s `qualify-hold` job holds its `full`, and the scheduled entry's `hold`
-// job holds its `reconcile`. The deploying run's own `full` is therefore exempt because it is
-// named, not because it is special-cased here.
+// diagnosis. The caller is the human dispatch only: `beta-qualification.yml` gates both the
+// token mint and this read on `trigger=manual` (all three operations) or on
+// `trigger=release-qualify` (a deliberate re-qualification). The automated dispatches are the
+// writer's own children — `deploy-qualify` for the deploy chain's `full`, `deploy-smoke`, and
+// the daily `scheduled` reconcile — and they never reach this read, so a queued foreign writer
+// cannot refuse a starter that runs inside the writer's held run.
+//
+// A dispatch that does reach the read and names its own writer run in `dispatched_by` is
+// admitted by the same one comparison, never by a second exemption path: `mutate.yml`'s
+// `qualify-hold` job holds its `full`, and the scheduled entry's `hold` job holds its
+// `reconcile`. That is why the rule needs no special case for a deploying run's parent.
 //
 // The read is credential-free for AWS: it mints nothing itself, declares no environment and
 // makes no cloud call. Its only input is one App installation token narrowed to
