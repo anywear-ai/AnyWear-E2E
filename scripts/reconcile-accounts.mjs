@@ -30,8 +30,9 @@ import { isCapturedBetaWorkerEmail, STABLE_WORKER_EMAIL_PATTERN } from '../tests
 // A teardown that cannot prove deletion records the identity `retained`; this operation finds
 // it again, replays the same exact-reference Service cleanup, deletes the Cognito identity by
 // its immutable username, reads absence back, and records the outcome against the original
-// run. It runs before every `qualify` suite and daily through the scheduled dispatch of the
-// same protected `workflow_dispatch` entry.
+// run. It runs before every `qualify` suite and daily through `AnyWear-Infra`'s scheduled
+// dispatch of the same protected `workflow_dispatch` entry (#344 moved the daily dispatch
+// into the writer repository; this repository keeps no schedule entry of its own).
 //
 // Two sources, one identity set:
 //   - the run-bound lifecycle manifests of the lookback are authoritative for their address,

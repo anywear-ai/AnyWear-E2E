@@ -139,11 +139,22 @@ Run install and build commands from this repository.
   deletion records its identity `retained` with a `retainedReason` and a `reconcileBy` bound
   (24 hours after the account record's own `createdAt`), fails its own run exactly as before,
   and is resolved by the `reconcile` operation: a job before every `qualify` suite, and a
-  daily dispatch of the same protected `workflow_dispatch` entry from `reconcile-schedule.yml`
-  (`trigger=scheduled`). There is no quarantine budget and no `quarantined` account status; a
+  daily dispatch of the same protected `workflow_dispatch` entry by `AnyWear-Infra`'s
+  scheduled entry (`schedule.yml`, `trigger=scheduled`). This repository has no schedule
+  entry of its own: the daily dispatch has one starter, in the writer repository.
+  There is no quarantine budget and no `quarantined` account status; a
   historical manifest recording `quarantined` reads as `retained`. `retained` consumes no
   active-account budget, while its own address stays out of the pool until the identity is
   deleted; `maxNewAccountsPerRun` still counts every attempt.
+- A qualification is admitted only when no `AnyWear-Infra` writer is holding the served tuple
+  (#344). The credential-free preflight mints one read-only `AnyWear-Infra` App token
+  (`actions: read` only), lists the nonterminal `mutate.yml` and scheduled-entry runs across
+  `requested`, `waiting`, `pending`, `queued` and `in_progress` in
+  `scripts/writer-admission.mjs`, and refuses only when a successfully read list names a run
+  that is not this dispatch's `dispatched_by` while that run's hold job (`qualify-hold` for
+  `mutate.yml`, `hold` for the scheduled entry) is nonterminal. An unreadable list warns and
+  admits. The deploying run's own `full` is admitted by construction, because its
+  `dispatched_by` names the run that is holding it; do not add a second exemption path.
 - Attribution follows the creator, not the address (#217). Every protected credential step
   assumes `beta-e2e-qualification-role` with
   `role-session-name: e2e-${{ github.run_id }}-${{ github.run_attempt }}`, and

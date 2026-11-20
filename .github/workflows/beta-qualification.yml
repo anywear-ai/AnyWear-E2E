@@ -9,9 +9,10 @@ run-name: "Beta qualification: ${{ inputs.operation }} · ${{ inputs.trigger }} 
 # dispatch surface carries three operations — `full` (release qualification), `smoke`
 # (deployed diagnostic) and `reconcile` (automatic leftover expiry) — and since #180 it is
 # also dispatched by other workflows: a deployment smoke hook (`trigger=deploy-smoke`), the
-# deploy chain's qualification (`trigger=deploy-qualify`, #226) and, since #217, the daily
-# account-reconcile schedule (`trigger=scheduled`). `trigger=release-qualify` stays the
-# human-only re-qualification trigger: after #226 no workflow sends it.
+# deploy chain's qualification (`trigger=deploy-qualify`, #226) and, since #217, a daily
+# account-reconcile dispatch (`trigger=scheduled`) that #344 moved into `AnyWear-Infra`'s
+# scheduled entry. `trigger=release-qualify` stays the human-only re-qualification trigger:
+# after #226 no workflow sends it.
 #
 # #217: leftover data is bounded by time, not quarantined, and the manual `recover` exit is
 # removed. The `reconcile` job runs before every qualification suite and as its own
@@ -256,9 +257,11 @@ jobs:
               fi
               ;;
             scheduled)
-              # #217: the daily account-reconcile schedule dispatches this entry, because the
-              # execution guard requires `workflow_dispatch` and a `schedule` event would fail
-              # closed. It may only ask for the reconcile operation.
+              # #217/#344: the daily account-reconcile dispatch belongs to `AnyWear-Infra`'s
+              # scheduled entry, which dispatches this entry because the execution guard
+              # requires `workflow_dispatch` and a `schedule` event would fail closed. It may
+              # only ask for the reconcile operation. This repository keeps no schedule entry
+              # of its own: the daily dispatch has one starter, in the writer repository.
               if [[ "$OPERATION" != reconcile ]]; then
                 echo "::error::trigger scheduled requires operation reconcile (got '$OPERATION')"
                 exit 1
@@ -304,6 +307,34 @@ jobs:
 
       - name: Require protected execution
         run: node scripts/execution-guard.mjs --source-only
+
+      # #344: the outbound half of the writer/starter pair. `AnyWear-Infra` is the single
+      # writer of the served tuple and the single starter of automated qualifications, so a
+      # qualification a human starts is admitted only when no Infra writer run is holding the
+      # tuple. The automated dispatches are admitted by construction, because the run that is
+      # holding them is the run their `dispatched_by` names. The read is credential-free for
+      # AWS: it mints one read-only App token for `AnyWear-Infra` (`actions: read` only),
+      # declares no `environment` and requests no OIDC permission, so it belongs here, ahead of
+      # every credential job.
+      - name: Generate Infra writer read token
+        id: infra-writer-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: AnyWear-Infra
+          permission-actions: read
+
+      # The admission reads the nonterminal Infra writer runs and refuses only when a
+      # successfully read list names a foreign run whose hold job (`qualify-hold` for
+      # `mutate.yml`, `hold` for the scheduled entry) is nonterminal. An unreadable list warns
+      # and admits, so a failing writer cannot lock the operator out of diagnosing it.
+      - name: Admit this qualification only when no Infra writer holds the tuple
+        env:
+          GH_TOKEN: ${{ steps.infra-writer-token.outputs.token }}
+          DISPATCHED_BY: ${{ inputs.dispatched_by }}
+        run: node scripts/writer-admission.mjs --dispatched-by "$DISPATCHED_BY"
 
       # The live identity, the supported-Client floor and the immutable Service release are
       # verified here, before any job holds a credential. The check reads only the two

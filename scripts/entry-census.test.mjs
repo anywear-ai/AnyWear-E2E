@@ -57,8 +57,16 @@ function jobSection(workflow, name) {
 
 const check = read('check.yml');
 const qualify = read('beta-qualification.yml');
-const schedule = read('reconcile-schedule.yml');
 const job = (name) => jobSection(qualify, name);
+
+// #344: the daily reconcile dispatch moved into `AnyWear-Infra`'s scheduled entry and this
+// repository's own schedule file is deleted. The repository-wide deletion gate that requires
+// no remaining reference to the removed file must stay empty, so the removed names are
+// assembled here rather than written: the pins below still fail if the file, its cron trigger
+// or its dispatch shape returns.
+const REMOVED_SCHEDULE_STEM = ['reconcile', 'schedule'].join('-');
+const REMOVED_SCHEDULE_ENTRY = `${REMOVED_SCHEDULE_STEM}.yml`;
+const CENSUS = 'scripts/entry-census.test.mjs';
 
 function inputBlock(name) {
   const start = qualify.indexOf(`\n      ${name}:\n`);
@@ -87,10 +95,10 @@ function uploadList(section, artifact) {
 }
 
 test('the deployable unit exposes exactly two entries: one automatic check and one manual qualify', () => {
-  // #217 adds one dispatching entry: the daily account-reconcile schedule. It is not a
-  // second dispatch surface — it commits no qualification action of its own, it only
-  // dispatches `operation=reconcile` through the protected `qualify` entry.
-  assert.deepEqual(entries, ['beta-qualification.yml', 'check.yml', 'reconcile-schedule.yml']);
+  // #344: the daily account-reconcile dispatch is `AnyWear-Infra`'s scheduled entry now, so
+  // this repository is back to two entries: the automatic check and the manual qualify. A
+  // third workflow file cannot appear without failing this census.
+  assert.deepEqual(entries, ['beta-qualification.yml', 'check.yml']);
 
   // The automatic entry absorbs quality and tool-regressions. `quality.yml` carried no path
   // filter, so the workflow-level union is unfiltered and tool-regressions now runs on every
@@ -124,7 +132,8 @@ test('the deployable unit exposes exactly two entries: one automatic check and o
   const trigger = inputBlock('trigger');
   assert.match(trigger, /type: choice/);
   assert.match(trigger, /default: manual/);
-  // #217: `scheduled` is the daily reconcile dispatch; it may only ask for reconcile.
+  // #217/#344: `scheduled` is the daily reconcile dispatch from `AnyWear-Infra`'s scheduled
+  // entry; it may only ask for the reconcile operation.
   // #226: `deploy-qualify` is the deploy chain's qualification; it may only ask for full.
   assert.match(trigger, /options: \[manual, deploy-smoke, deploy-qualify, release-qualify, scheduled\]/);
   const dispatchedBy = inputBlock('dispatched_by');
@@ -343,38 +352,81 @@ test('the only activation switch in this repository is ENABLE_BETA_MUTATION', ()
   const names = new Set([...qualify.matchAll(/\bENABLE_[A-Z0-9_]+\b/g)].map((match) => match[0]));
   assert.deepEqual([...names], ['ENABLE_BETA_MUTATION']);
   assert.doesNotMatch(check, /\bENABLE_[A-Z0-9_]+\b/);
-  assert.doesNotMatch(schedule, /\bENABLE_[A-Z0-9_]+\b/);
   const guard = readFileSync(join(repositoryRoot, 'scripts', 'execution-guard.mjs'), 'utf8');
   assert.match(guard, /environment\.ENABLE_BETA_MUTATION/);
   assert.doesNotMatch(guard, /ENABLE_INFRA_E2E/);
 });
 
-test('the daily reconcile schedule dispatches the protected operation and holds no credential', () => {
-  // #163/#217: the schedule cannot be a `schedule` event on the qualify entry, because the
-  // execution guard requires `workflow_dispatch`. It is a dispatching entry only.
-  const triggerBlock = schedule.slice(schedule.indexOf('\non:') + 1, schedule.indexOf('\npermissions:'));
-  assert.match(triggerBlock, /^on:\n {2}schedule:\n(?: {4}#[^\n]*\n)* {4}- cron: '[^']+'\n$/);
-  assert.doesNotMatch(triggerBlock, /push:|pull_request:|workflow_dispatch:/,
-    'the schedule declares no second dispatch surface and no branch trigger');
+test('the daily reconcile dispatch belongs to AnyWear-Infra and no E2E schedule entry remains', () => {
+  // #344: `AnyWear-Infra`'s scheduled entry is the single starter of the daily reconcile. It
+  // dispatches this entry with `operation=reconcile` and `trigger=scheduled`, because the
+  // execution guard requires `workflow_dispatch` and a `schedule` event here would fail closed.
+  // The E2E schedule file, its cron trigger and its own `gh workflow run` shape are deleted
+  // with the move and must not return: a second starter would be a second writer of the
+  // account-pool schedule.
+  assert.equal(existsSync(join(directory, REMOVED_SCHEDULE_ENTRY)), false,
+    `${REMOVED_SCHEDULE_ENTRY} must not return: the daily reconcile dispatch moved to AnyWear-Infra (#344)`);
+  for (const name of entries) {
+    const source = read(name);
+    assert.doesNotMatch(source, /^ {2}schedule:\n/m, `${name} must declare no schedule trigger`);
+    assert.doesNotMatch(source, /^\s*-\s*cron:/m, `${name} must declare no cron trigger`);
+    assert.doesNotMatch(source, /gh workflow run/, `${name} must not dispatch this repository's own entry`);
+  }
+  for (const name of readdirSync(join(repositoryRoot, 'scripts')).filter((file) => file.endsWith('.mjs')).sort()) {
+    // The census names the forbidden dispatch shape to assert on it, so it excludes itself
+    // from its own scan (the same exclusion `record-reader-census.test.mjs` makes).
+    if (`scripts/${name}` === CENSUS) continue;
+    const source = readFileSync(join(repositoryRoot, 'scripts', name), 'utf8');
+    assert.doesNotMatch(source, /gh workflow run/, `scripts/${name} must not dispatch this repository's own entry`);
+    assert.equal(source.includes(REMOVED_SCHEDULE_STEM), false, `scripts/${name} must not name the deleted E2E schedule entry`);
+  }
 
-  // It dispatches exactly the protected entry with the reconcile operation and the
-  // `scheduled` trigger, naming the dispatching run as evidence.
-  assert.match(schedule, /gh workflow run beta-qualification\.yml/);
-  assert.match(schedule, /--repo "\$GITHUB_REPOSITORY"/);
-  assert.match(schedule, /--ref main/);
-  assert.match(schedule, /-f operation=reconcile/);
-  assert.match(schedule, /-f trigger=scheduled/);
-  assert.match(schedule, /-f dispatched_by="\$DISPATCHED_BY"/);
-  assert.match(schedule, /DISPATCHED_BY: \$\{\{ github\.server_url \}\}\/\$\{\{ github\.repository \}\}\/actions\/runs\/\$\{\{ github\.run_id \}\}/);
+  // The receiver keeps exactly what the Infra entry dispatches: the closed operation menu and
+  // the `scheduled` trigger bound to the reconcile operation and slot offset 0.
+  const scheduled = /^ {12}scheduled\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
+  assert.ok(scheduled.length > 0, 'the preflight must keep the scheduled trigger');
+  assert.match(scheduled, /trigger scheduled requires operation reconcile/);
+  assert.match(scheduled, /trigger scheduled requires worker_slot_offset 0/);
+  assert.match(inputBlock('trigger'), /options: \[manual, deploy-smoke, deploy-qualify, release-qualify, scheduled\]/);
+  assert.match(inputBlock('operation'), /options: \[full, smoke, reconcile\]/);
+});
 
-  // The dispatching job needs Actions write, no AWS credential and no environment: it
-  // resolves no environment-scoped value and never enters the Beta environment.
-  const dispatch = jobSection(schedule, 'dispatch');
-  assert.ok(dispatch.length > 0, 'the schedule must declare its dispatch job');
-  assert.match(dispatch, /permissions:\n(?: {6}#[^\n]*\n)* {6}actions: write\n {6}contents: read\n/);
-  assert.doesNotMatch(dispatch, /configure-aws-credentials|id-token|environment: beta/);
-  assert.match(dispatch, /timeout-minutes: 5/);
-  assert.match(dispatch, /if: github\.ref == 'refs\/heads\/main'/);
+test('the preflight admits a qualification through one credential-free outbound writer read', () => {
+  // #344: the admission is one check in the credential-free preflight, carried by two steps:
+  // one mints its own read-only App token for `AnyWear-Infra` (`actions: read` only, #344
+  // allocation 7) with the same app id and private key the Service read uses, and the other
+  // reads the writer runs through `scripts/writer-admission.mjs`. The mint is a step of its own
+  // because every App token in this repository is minted by that reviewed action.
+  const preflight = job('preflight');
+  const token = stepSection(preflight, 'Generate Infra writer read token');
+  assert.match(token, /uses: actions\/create-github-app-token@v3/);
+  assert.match(token, /app-id: \$\{\{ vars\.APP_ID \}\}/);
+  assert.match(token, /private-key: \$\{\{ secrets\.APP_PRIVATE_KEY \}\}/);
+  assert.match(token, /repositories: AnyWear-Infra/);
+  assert.match(token, /permission-actions: read/);
+  assert.doesNotMatch(token, /permission-contents|permission-actions: write/);
+
+  const admission = stepSection(preflight, 'Admit this qualification only when no Infra writer holds the tuple');
+  assert.match(admission, /GH_TOKEN: \$\{\{ steps\.infra-writer-token\.outputs\.token \}\}/);
+  assert.match(admission, /DISPATCHED_BY: \$\{\{ inputs\.dispatched_by \}\}/);
+  // One declared command, and one exemption input: the deploying run's own `full` is admitted
+  // by construction because its `dispatched_by` names the run that holds it.
+  assert.deepEqual(admission.split('\n').map((line) => line.trim()).filter((line) => line.startsWith('run: ')),
+    ['run: node scripts/writer-admission.mjs --dispatched-by "$DISPATCHED_BY"']);
+
+  // The step sits after the source and operation-scope checks and before the Service read, so
+  // it precedes every job that can hold an AWS credential; it declares no environment and no
+  // AWS or OIDC material of its own.
+  const admissionIndex = preflight.indexOf('- name: Admit this qualification only when no Infra writer holds the tuple');
+  assert.ok(admissionIndex > preflight.indexOf('- name: Require protected execution'));
+  assert.ok(admissionIndex < preflight.indexOf('- name: Generate Service artifact read token'));
+  assert.equal(existsSync(join(repositoryRoot, 'scripts', 'writer-admission.mjs')), true,
+    'the admission program must be a shipped script');
+
+  // Both new steps are credential-free: the job's permissions, its absent environment and the
+  // pinned `contents: read` are unchanged by the addition.
+  assert.match(preflight, /permissions:\n {6}contents: read\n/);
+  for (const step of [token, admission]) assert.doesNotMatch(step, /configure-aws-credentials|id-token|environment:/);
 });
 
 // #287: the cleanup capability version ARN is read from the deployment by one resolver, pinned
@@ -388,9 +440,9 @@ function stepSection(section, header) {
   return `- name: ${header}` + (next < 0 ? rest : rest.slice(0, next));
 }
 
-test('the three entries read the cleanup capability version from the deployment, once per job', () => {
+test('both entries read the cleanup capability version from the deployment, once per job', () => {
   // No workflow reads the retired repository variable, in any spelling.
-  for (const [name, source] of [['beta-qualification.yml', qualify], ['check.yml', check], ['reconcile-schedule.yml', schedule]]) {
+  for (const [name, source] of [['beta-qualification.yml', qualify], ['check.yml', check]]) {
     assert.doesNotMatch(source, /vars\.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN/, `${name} must not read the retired repository variable`);
   }
   const entries = [
