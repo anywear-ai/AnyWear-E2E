@@ -429,14 +429,13 @@ executing the retired Service parser, reading a manifest or downloading a releas
 Verify that Infra/Client/legacy writers have ceased before allocating an E2E
 qualification window. Repository-local concurrency
 does not serialize those other repositories. Keep `ENABLE_BETA_MUTATION` unset or
-`false` during preparation. For an authorized protected Beta dispatch, configure:
+`false` during preparation. For an authorized protected Beta dispatch, set or verify:
 
 | Variable | Required value |
 | --- | --- |
 | `ENABLE_BETA_MUTATION` | `true` only after role/access/cutover gates pass; the single stage switch shared by the system |
-| `E2E_CLEANUP_SERVICE_SOURCE_SHA` | Full reviewed deployed Service source SHA bound into the fixed cleanup capability |
-| `E2E_CLEANUP_SERVICE_SHA` | Legacy source/operator guard value retained during cutover |
-| `E2E_CLEANUP_SERVICE_IMAGE_DIGEST` | Reviewed deployed Service image digest |
+| `E2E_CLEANUP_SERVICE_SOURCE_SHA` | Full reviewed deployed Service source SHA, derived by each job from its own deployment evidence and never configured |
+| `E2E_CLEANUP_SERVICE_IMAGE_DIGEST` | Reviewed deployed Service image digest, derived by each job from its own deployment evidence and never configured |
 | `E2E_WORKER_SLOT_OFFSET` | Allocated first slot, integer 0 through 7; the selected workers must fit within slots 0 through 7 |
 | `AWS_ACCOUNT_ID`, `AWS_REGION` | `650880818323`, `ap-east-1` |
 
@@ -446,6 +445,23 @@ for the job and appends the value and the output it came from to the run's step 
 `full`, `smoke` and `reconcile` entries all take the value from that one read, and each re-checks
 it against the deployment before the first account or deletion and again before every new cleanup
 execution. The former `BETA_CLEANUP_STATE_MACHINE_VERSION_ARN` repository variable is retired.
+
+The cleanup Service source and image are not configuration. `preflight` reads the deployed
+Service `/health` (`service_commit` and `image_digest`) and proves that the commit names exactly
+one published, immutable `service-artifacts-<sha>` release whose tag resolves to that commit and
+whose four assets carry published `sha256:` digests (`scripts/cleanup-source.mjs verify`); a
+`reconcile` dispatch, which is outside the live-identity gate, runs that proof on its own. The
+`preflight` job publishes the proved pair as `reviewed_service_commit` and
+`reviewed_service_image_digest` for `full` and `smoke` only, and each of those jobs derives
+`E2E_CLEANUP_SERVICE_SOURCE_SHA` and `E2E_CLEANUP_SERVICE_IMAGE_DIGEST` from its own deployment
+evidence and compares the two pairs before the first account or deletion
+(`scripts/cleanup-source.mjs gate`). A scheduled `reconcile` pins no pair, so a deployment replaced
+while it runs does not refuse the reconciliation; an in-suite `reconcile` inherits the
+qualification's pin and compares. Every refusal is one sentence carrying `unset`, `malformed`,
+`absent` or `drift`, both values, the operation, and the grammar that applied —
+`^[0-9a-f]{40}$` for the commit and `^sha256:[0-9a-f]{64}$` for the digest. The former
+`E2E_CLEANUP_SERVICE_SHA` repository variable is retired: no workflow, script or test reads it, and
+`pnpm check` refuses its reintroduction.
 
 The protected Beta environment, exact repository/owner IDs, main workflow dispatch,
 the single `qualify` entry and the explicitly stated `operation` establish source

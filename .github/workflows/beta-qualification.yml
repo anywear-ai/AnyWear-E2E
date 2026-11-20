@@ -133,13 +133,14 @@ jobs:
       # The gate that authorizes the credential jobs is the gate that validated the
       # operation: the operation jobs read this output, not the raw dispatch input.
       operation: ${{ steps.operation-scope.outputs.operation }}
+      reviewed_service_commit: ${{ steps.live-identity.outputs.reviewed_service_commit }}
+      reviewed_service_image_digest: ${{ steps.live-identity.outputs.reviewed_service_image_digest }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       E2E_STAGE: beta
       E2E_OPERATION: ${{ inputs.operation }}
       E2E_EXTERNAL_SERVERS: true
       ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
-      E2E_CLEANUP_SERVICE_SHA: ${{ vars.E2E_CLEANUP_SERVICE_SHA }}
 
     steps:
       - name: Checkout E2E sources
@@ -318,6 +319,7 @@ jobs:
           permission-contents: read
 
       - name: Verify the live deployed tuple, supported-Client floor and immutable Service release
+        id: live-identity
         env:
           SERVICE_ARTIFACT_READ_TOKEN: ${{ steps.service-artifact-token.outputs.token }}
           GH_TOKEN: ${{ steps.service-artifact-token.outputs.token }}
@@ -340,7 +342,21 @@ jobs:
               echo "- Minimum Client: $(jq -r '.service.minimum_client_version' .qualification-inputs/live-identity.json)"
               echo "- Service release: \`$(jq -r '.tag' .qualification-inputs/service-release.json)\` (target $(jq -r '.target_commit' .qualification-inputs/service-release.json), $(jq -r '.assets | length' .qualification-inputs/service-release.json) released assets)"
             } >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "reviewed_service_commit=$(jq -r '.service.service_commit' .qualification-inputs/live-identity.json)"
+              echo "reviewed_service_image_digest=$(jq -r '.service.image_digest' .qualification-inputs/live-identity.json)"
+            } >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Verify the reviewed cleanup source against the immutable Service release
+        # reconcile is outside the live-identity gate (#217), so it proves the deployed
+        # commit names its immutable release here, still credential-free.
+        if: steps.operation-scope.outputs.operation == 'reconcile'
+        env:
+          SERVICE_ARTIFACT_READ_TOKEN: ${{ steps.service-artifact-token.outputs.token }}
+          GH_TOKEN: ${{ steps.service-artifact-token.outputs.token }}
+        shell: bash
+        run: node scripts/cleanup-source.mjs verify --operation "$E2E_OPERATION" --service-url "$E2E_SERVICE_URL"
 
   # #217: automatic leftover expiry. It runs before every qualification suite and as its own
   # dispatched operation, so a qualification starts from a reconciled environment and no
@@ -367,7 +383,6 @@ jobs:
       E2E_STAGE: beta
       E2E_OPERATION: ${{ inputs.operation }}
       ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
-      E2E_CLEANUP_SERVICE_SHA: ${{ vars.E2E_CLEANUP_SERVICE_SHA }}
       # The reviewed lookback and the job's own deadline. An ordinary reconcile stops starting
       # work at 720 seconds inside a 15-minute job; the one migration dispatch stops at 1500
       # seconds inside a 30-minute job, and the remaining deadline is passed into every cleanup
@@ -433,15 +448,25 @@ jobs:
       - name: Load the Beta pool and the live cleanup identity
         env:
           QUALIFICATION_EVIDENCE_PATH: reconcile/deployment-evidence.json
+          EXPECTED_SERVICE_COMMIT: ${{ needs.preflight.outputs.reviewed_service_commit }}
+          EXPECTED_SERVICE_IMAGE_DIGEST: ${{ needs.preflight.outputs.reviewed_service_image_digest }}
         run: |
           version_arn=$(node scripts/cleanup-capability.mjs resolve)
           mkdir -p reconcile
           pool_id=$(aws ssm get-parameter --name /anywear/beta/cognito_user_pool_id --query Parameter.Value --output text)
           pnpm qualification:collect
+          cleanup_source=$(jq -r '.service.service_commit' reconcile/deployment-evidence.json)
+          cleanup_image=$(jq -r '.service.image_digest' reconcile/deployment-evidence.json)
+          if [[ -n "$EXPECTED_SERVICE_COMMIT" ]]; then
+            gate_args=(--operation "$E2E_OPERATION" --expected-service-commit "$EXPECTED_SERVICE_COMMIT")
+            if [[ -n "$EXPECTED_SERVICE_IMAGE_DIGEST" ]]; then gate_args+=(--expected-service-image-digest "$EXPECTED_SERVICE_IMAGE_DIGEST"); fi
+            E2E_CLEANUP_SERVICE_SOURCE_SHA="$cleanup_source" E2E_CLEANUP_SERVICE_IMAGE_DIGEST="$cleanup_image" \
+              node scripts/cleanup-source.mjs gate "${gate_args[@]}"
+          fi
           {
             echo "USER_POOL_ID=$pool_id"
-            echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$(jq -r '.service.service_commit' reconcile/deployment-evidence.json)"
-            echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$(jq -r '.service.image_digest' reconcile/deployment-evidence.json)"
+            echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$cleanup_source"
+            echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$cleanup_image"
             echo "BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=$version_arn"
           } >> "$GITHUB_ENV"
 
@@ -484,7 +509,6 @@ jobs:
       E2E_OPERATION: ${{ inputs.operation }}
       E2E_EXTERNAL_SERVERS: true
       ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
-      E2E_CLEANUP_SERVICE_SHA: ${{ vars.E2E_CLEANUP_SERVICE_SHA }}
       CLEANUP_MACHINE_AUTH_SECRET: ${{ secrets.CLEANUP_MACHINE_AUTH_SECRET }}
       E2E_WORKERS: 2
       E2E_WORKER_SLOT_OFFSET: ${{ inputs.worker_slot_offset }}
@@ -583,17 +607,28 @@ jobs:
       # uses the pin and never resolves it again. The command substitution is the command, so a
       # refused resolve fails the step before the suite creates its first test account.
       - name: Load Beta test identity configuration
+        env:
+          EXPECTED_SERVICE_COMMIT: ${{ needs.preflight.outputs.reviewed_service_commit }}
+          EXPECTED_SERVICE_IMAGE_DIGEST: ${{ needs.preflight.outputs.reviewed_service_image_digest }}
         shell: bash
         run: |
           version_arn=$(node scripts/cleanup-capability.mjs resolve)
           pool_id=$(aws ssm get-parameter --name /anywear/beta/cognito_user_pool_id --query Parameter.Value --output text)
           client_id=$(aws ssm get-parameter --name /anywear/beta/cognito_client_id --query Parameter.Value --output text)
+          cleanup_source=$(jq -r '.service.service_commit' deployment-evidence-before.json)
+          cleanup_image=$(jq -r '.service.image_digest' deployment-evidence-before.json)
+          if [[ -n "$EXPECTED_SERVICE_COMMIT" ]]; then
+            gate_args=(--operation "$E2E_OPERATION" --expected-service-commit "$EXPECTED_SERVICE_COMMIT")
+            if [[ -n "$EXPECTED_SERVICE_IMAGE_DIGEST" ]]; then gate_args+=(--expected-service-image-digest "$EXPECTED_SERVICE_IMAGE_DIGEST"); fi
+            E2E_CLEANUP_SERVICE_SOURCE_SHA="$cleanup_source" E2E_CLEANUP_SERVICE_IMAGE_DIGEST="$cleanup_image" \
+              node scripts/cleanup-source.mjs gate "${gate_args[@]}"
+          fi
           {
             echo "USER_POOL_ID=$pool_id"
             echo "VITE_COGNITO_USER_POOL_ID=$pool_id"
             echo "VITE_COGNITO_CLIENT_ID=$client_id"
-            echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$(jq -r '.service.image_digest' deployment-evidence-before.json)"
-            echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$(jq -r '.service.service_commit' deployment-evidence-before.json)"
+            echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$cleanup_image"
+            echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$cleanup_source"
             echo "BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=$version_arn"
           } >> "$GITHUB_ENV"
 
@@ -796,7 +831,6 @@ jobs:
       E2E_OPERATION: ${{ inputs.operation }}
       E2E_EXTERNAL_SERVERS: true
       ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
-      E2E_CLEANUP_SERVICE_SHA: ${{ vars.E2E_CLEANUP_SERVICE_SHA }}
       CLEANUP_MACHINE_AUTH_SECRET: ${{ secrets.CLEANUP_MACHINE_AUTH_SECRET }}
       E2E_WORKERS: 2
       E2E_WORKER_SLOT_OFFSET: ${{ inputs.worker_slot_offset }}
@@ -893,17 +927,28 @@ jobs:
       # uses the pin and never resolves it again. The command substitution is the command, so a
       # refused resolve fails the step before the smoke suite creates its first test account.
       - name: Load Beta test identity configuration
+        env:
+          EXPECTED_SERVICE_COMMIT: ${{ needs.preflight.outputs.reviewed_service_commit }}
+          EXPECTED_SERVICE_IMAGE_DIGEST: ${{ needs.preflight.outputs.reviewed_service_image_digest }}
         shell: bash
         run: |
           version_arn=$(node scripts/cleanup-capability.mjs resolve)
           pool_id=$(aws ssm get-parameter --name /anywear/beta/cognito_user_pool_id --query Parameter.Value --output text)
           client_id=$(aws ssm get-parameter --name /anywear/beta/cognito_client_id --query Parameter.Value --output text)
+          cleanup_source=$(jq -r '.service.service_commit' deployment-evidence-before.json)
+          cleanup_image=$(jq -r '.service.image_digest' deployment-evidence-before.json)
+          if [[ -n "$EXPECTED_SERVICE_COMMIT" ]]; then
+            gate_args=(--operation "$E2E_OPERATION" --expected-service-commit "$EXPECTED_SERVICE_COMMIT")
+            if [[ -n "$EXPECTED_SERVICE_IMAGE_DIGEST" ]]; then gate_args+=(--expected-service-image-digest "$EXPECTED_SERVICE_IMAGE_DIGEST"); fi
+            E2E_CLEANUP_SERVICE_SOURCE_SHA="$cleanup_source" E2E_CLEANUP_SERVICE_IMAGE_DIGEST="$cleanup_image" \
+              node scripts/cleanup-source.mjs gate "${gate_args[@]}"
+          fi
           {
             echo "USER_POOL_ID=$pool_id"
             echo "VITE_COGNITO_USER_POOL_ID=$pool_id"
             echo "VITE_COGNITO_CLIENT_ID=$client_id"
-            echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$(jq -r '.service.image_digest' deployment-evidence-before.json)"
-            echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$(jq -r '.service.service_commit' deployment-evidence-before.json)"
+            echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$cleanup_image"
+            echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$cleanup_source"
             echo "BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=$version_arn"
           } >> "$GITHUB_ENV"
 

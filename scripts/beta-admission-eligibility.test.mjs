@@ -24,7 +24,6 @@ function environment(patch = {}) {
     GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main',
     GITHUB_RUN_ID: '123456789', GITHUB_RUN_ATTEMPT: '1',
     E2E_STAGE: 'beta', ENABLE_BETA_MUTATION: 'true', E2E_WORKERS: '2', E2E_OPERATION: 'full',
-    E2E_CLEANUP_SERVICE_SHA: 'b'.repeat(40),
     AWS_ACCOUNT_ID: '650880818323', AWS_REGION: 'ap-east-1', E2E_AWS_ACCOUNT: '650880818323',
     E2E_AWS_PRINCIPAL_ARN: 'arn:aws:sts::650880818323:assumed-role/beta-e2e-qualification-role/e2e-123456789-1',
     ...patch,
@@ -118,7 +117,7 @@ test('missing or foreign dedicated identity and untrusted dispatch fail before a
     { E2E_STAGE: 'dev' }, { ENABLE_BETA_MUTATION: 'false' },
     { E2E_OPERATION: undefined }, { E2E_OPERATION: 'observe' },
     { AWS_ACCOUNT_ID: '111111111111' }, { AWS_REGION: 'us-east-1' },
-    { E2E_CLEANUP_SERVICE_SHA: undefined }, { GITHUB_RUN_ID: undefined },
+    { GITHUB_RUN_ID: undefined },
   ]) {
     const io = reader();
     assert.throws(() => verifyBetaAdmissionEligibility(environment(patch), { execute: io.execute, sourceSha }));

@@ -56,7 +56,6 @@ export function assertE2EExecution(environment = process.env, { sourceOnly = fal
     if (!/^[1-9]\d*$/.test(requireString(environment[name], name)) || !Number.isSafeInteger(Number(environment[name]))) throw new Error('Invalid E2E run/attempt identity');
   }
   if (environment.AWS_ACCOUNT_ID !== '650880818323' || environment.AWS_REGION !== 'ap-east-1') throw new Error('Unexpected E2E account/region');
-  requireCommit(environment.E2E_CLEANUP_SERVICE_SHA, 'Reviewed Service cleanup operator source');
   // Captured from STS immediately after the protected workflow assumes its
   // dedicated role. Source-only checks run before AWS credentials. The session name is the
   // run-scoped one the credential step set, so an identity can never be created under a
