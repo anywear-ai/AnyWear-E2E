@@ -59,13 +59,11 @@ const check = read('check.yml');
 const qualify = read('beta-qualification.yml');
 const job = (name) => jobSection(qualify, name);
 
-// #344: the daily reconcile dispatch moved into `AnyWear-Infra`'s scheduled entry and this
-// repository's own schedule file is deleted. The repository-wide deletion gate that requires
-// no remaining reference to the removed file must stay empty, so the removed names are
-// assembled here rather than written: the pins below still fail if the file, its cron trigger
-// or its dispatch shape returns.
-const REMOVED_SCHEDULE_STEM = ['reconcile', 'schedule'].join('-');
-const REMOVED_SCHEDULE_ENTRY = `${REMOVED_SCHEDULE_STEM}.yml`;
+// #344: the daily reconcile dispatch moved into `AnyWear-Infra`'s scheduled entry, so this
+// repository's own schedule file is deleted. Naming the deleted file and its token here is
+// what makes the removal guarded: the assertions below fail if either comes back.
+const REMOVED_SCHEDULE_ENTRY = 'reconcile-schedule.yml';
+const REMOVED_SCHEDULE_TOKENS = Object.freeze(['reconcile-schedule']);
 const CENSUS = 'scripts/entry-census.test.mjs';
 
 function inputBlock(name) {
@@ -371,14 +369,20 @@ test('the daily reconcile dispatch belongs to AnyWear-Infra and no E2E schedule 
     assert.doesNotMatch(source, /^ {2}schedule:\n/m, `${name} must declare no schedule trigger`);
     assert.doesNotMatch(source, /^\s*-\s*cron:/m, `${name} must declare no cron trigger`);
     assert.doesNotMatch(source, /gh workflow run/, `${name} must not dispatch this repository's own entry`);
+    for (const token of REMOVED_SCHEDULE_TOKENS) {
+      assert.equal(source.includes(token), false, `${name} must not name the deleted ${REMOVED_SCHEDULE_ENTRY}`);
+    }
   }
   for (const name of readdirSync(join(repositoryRoot, 'scripts')).filter((file) => file.endsWith('.mjs')).sort()) {
-    // The census names the forbidden dispatch shape to assert on it, so it excludes itself
-    // from its own scan (the same exclusion `record-reader-census.test.mjs` makes).
+    // The census names the deleted file and the forbidden dispatch shape to assert on them, so
+    // it excludes itself from its own scan (the same exclusion `record-reader-census.test.mjs`
+    // makes).
     if (`scripts/${name}` === CENSUS) continue;
     const source = readFileSync(join(repositoryRoot, 'scripts', name), 'utf8');
     assert.doesNotMatch(source, /gh workflow run/, `scripts/${name} must not dispatch this repository's own entry`);
-    assert.equal(source.includes(REMOVED_SCHEDULE_STEM), false, `scripts/${name} must not name the deleted E2E schedule entry`);
+    for (const token of REMOVED_SCHEDULE_TOKENS) {
+      assert.equal(source.includes(token), false, `scripts/${name} must not name the deleted ${REMOVED_SCHEDULE_ENTRY}`);
+    }
   }
 
   // The receiver keeps exactly what the Infra entry dispatches: the closed operation menu and
