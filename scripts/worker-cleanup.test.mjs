@@ -426,7 +426,7 @@ const capabilityIo = published => ({
   async aws(args) { this.calls.push(args); return publishedStack(published); },
 });
 const cleanupEnvironment = (evidencePath, version = 7) => ({
-  E2E_CLEANUP_SERVICE_SHA: 'a'.repeat(40),
+  E2E_CLEANUP_SERVICE_SOURCE_SHA: 'a'.repeat(40),
   E2E_CLEANUP_SERVICE_IMAGE_DIGEST: `sha256:${'b'.repeat(64)}`,
   BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: versionArn(version),
   E2E_SERVICE_CLEANUP_EVIDENCE_PATH: evidencePath,

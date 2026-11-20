@@ -230,6 +230,82 @@ test('the cleanup capability version is read from the deployment, never from a r
   }
 });
 
+test('the retired E2E_CLEANUP_SERVICE_SHA variable is removed', () => {
+  const readVariable = /\$\{\{\s*vars\.E2E_CLEANUP_SERVICE_SHA\s*\}\}/;
+  const declareVariable = /E2E_CLEANUP_SERVICE_SHA:\s*\$\{\{/;
+  // The literal names appear here only as fixtures for the two detectors: a regression would
+  // take one of these shapes, and both must be refused.
+  assert.match('E2E_CLEANUP_SERVICE_SHA: ${{ vars.E2E_CLEANUP_SERVICE_SHA }}', readVariable);
+  assert.match('E2E_CLEANUP_SERVICE_SHA: ${{ vars.OTHER }}', declareVariable);
+  for (const file of files) {
+    assert.doesNotMatch(read(file), readVariable, `${file} must not read the retired repository variable`);
+    assert.doesNotMatch(read(file), declareVariable,
+      `${file} must not declare the retired variable from a workflow expression`);
+  }
+  const scripts = readdirSync(join(repositoryRoot, 'scripts'))
+    .filter((name) => /\.mjs$/.test(name) && !/\.test\.mjs$/.test(name)).sort();
+  for (const name of scripts) {
+    const text = readFileSync(join(repositoryRoot, 'scripts', name), 'utf8');
+    assert.doesNotMatch(text, /E2E_CLEANUP_SERVICE_SHA/, `scripts/${name} must not contain the retired variable`);
+    assert.doesNotMatch(text, /actions\/variables|gh variable get/,
+      `scripts/${name} must not reach the repository-variable API`);
+  }
+  const cleanupOp = readFileSync(join(repositoryRoot, 'tests', 'support', 'service-cleanup-operation.ts'), 'utf8');
+  assert.doesNotMatch(cleanupOp, /E2E_CLEANUP_SERVICE_SHA/, `tests/support/service-cleanup-operation.ts must not contain the retired variable`);
+});
+
+// A step's text runs from `- name: <header>` to the next six-space step header.
+function stepText(jobText, header) {
+  const start = jobText.indexOf(`- name: ${header}`);
+  assert.ok(start >= 0, `${header} must be a step`);
+  const rest = jobText.slice(start + 1);
+  const next = rest.search(/\n {6}- name: /);
+  return `- name: ${header}` + (next < 0 ? rest : rest.slice(0, next));
+}
+
+test('preflight publishes the reviewed cleanup pair for full and smoke only, and reconcile proves it alone', () => {
+  const preflight = job('preflight').text;
+  // #339: the pair is published from the existing live-identity step, inside its existing
+  // full||smoke branch, so a scheduled reconcile produces no pin.
+  assert.match(preflight, /^ {6}reviewed_service_commit: \$\{\{ steps\.live-identity\.outputs\.reviewed_service_commit \}\}$/m);
+  assert.match(preflight, /^ {6}reviewed_service_image_digest: \$\{\{ steps\.live-identity\.outputs\.reviewed_service_image_digest \}\}$/m);
+  const branch = preflight.indexOf('if [[ "$OPERATION" == full || "$OPERATION" == smoke ]]; then');
+  assert.ok(branch >= 0, 'the live-identity step must keep its full||smoke branch');
+  const publish = preflight.slice(branch, preflight.indexOf('\n      - name: ', branch));
+  assert.match(publish, /reviewed_service_commit=\$\(jq/);
+  assert.match(publish, /reviewed_service_image_digest=\$\(jq/);
+  assert.match(publish, />> "\$GITHUB_OUTPUT"/);
+  // `reconcile` is outside the live-identity gate, so it gets its own credential-free proof
+  // through the same reader; the step is a preflight step and needs the existing scoped token.
+  const proof = stepText(preflight, 'Verify the reviewed cleanup source against the immutable Service release');
+  assert.match(proof, /if: steps\.operation-scope\.outputs\.operation == 'reconcile'/);
+  assert.match(proof, /SERVICE_ARTIFACT_READ_TOKEN: \$\{\{ steps\.service-artifact-token\.outputs\.token \}\}/);
+  assert.match(proof, /node scripts\/cleanup-source\.mjs verify --operation "\$E2E_OPERATION" --service-url "\$E2E_SERVICE_URL"/);
+});
+
+test('every derive step compares the bound pair with the preflight pin before it writes the pair', () => {
+  const steps = [
+    ['reconcile', 'Load the Beta pool and the live cleanup identity'],
+    ['full', 'Load Beta test identity configuration'],
+    ['smoke', 'Load Beta test identity configuration'],
+  ];
+  for (const [name, header] of steps) {
+    const step = stepText(job(name).text, header);
+    assert.match(step, /EXPECTED_SERVICE_COMMIT: \$\{\{ needs\.preflight\.outputs\.reviewed_service_commit \}\}/,
+      `${name} must read the pinned commit`);
+    assert.match(step, /EXPECTED_SERVICE_IMAGE_DIGEST: \$\{\{ needs\.preflight\.outputs\.reviewed_service_image_digest \}\}/,
+      `${name} must read the pinned digest`);
+    // The comparison is guarded by the pin, so a scheduled reconcile (no pin) compares nothing,
+    // and it runs before the pair reaches the job environment.
+    const gate = step.indexOf('node scripts/cleanup-source.mjs gate');
+    const write = step.indexOf('} >> "$GITHUB_ENV"');
+    assert.ok(gate >= 0, `${name} must call the pair comparison`);
+    assert.ok(write > gate, `${name} must compare the pair before writing it`);
+    assert.match(step.slice(step.indexOf('if [[ -n "$EXPECTED_SERVICE_COMMIT" ]]'), gate),
+      /if \[\[ -n "\$EXPECTED_SERVICE_COMMIT" \]\]; then/);
+  }
+});
+
 test('every job that invokes gh release verify declares attestations: read', () => {
   // Vacuous today: no step in this repository runs `gh release verify`. The pin is generic
   // so the first step that does must declare the attestation read scope.

@@ -10,7 +10,7 @@ import { cleanupExecutionArn, createCleanupOperationEnvelope, deterministicClean
 const scope = `123456789-1-${'a'.repeat(16)}`;
 const inputs = { action: 'cleanup', emails: '[]', cleanup_json: JSON.stringify({ runScope: scope,
   users: [{ sub: '10000000-0000-4000-8000-000000000001', email: 'e2e-beta-worker-0-chromium@anywear.local' }] }) };
-const environment = { E2E_CLEANUP_SERVICE_SHA: 'a'.repeat(40), E2E_CLEANUP_SERVICE_IMAGE_DIGEST: `sha256:${'b'.repeat(64)}`,
+const environment = { E2E_CLEANUP_SERVICE_SOURCE_SHA: 'a'.repeat(40), E2E_CLEANUP_SERVICE_IMAGE_DIGEST: `sha256:${'b'.repeat(64)}`,
   BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: 'arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:7', AWS_REGION: 'ap-east-1' };
 const envelope = createCleanupOperationEnvelope(inputs, environment);
 const name0 = deterministicCleanupExecutionName(envelope, 0);
@@ -89,7 +89,7 @@ const RECORDED_IMAGE = 'sha256:02828a7611faa82a108c37f436dbcc73f8c6fa5149255fc8d
 const RECORDED_INPUT_SHA256 = '9ffea293028445e5d287bcab0691751bfc240f33b750f1ca105da16736d0bd7c';
 const RECORDED_NAME = 'beta-cleanup-38851867995-1-0000000000000000-8e12aa9ab79b504a';
 const recordedInputs = { ...inputs, cleanup_json: RECORDED_CLEANUP_REQUEST };
-const recordedEnvironment = { ...environment, E2E_CLEANUP_SERVICE_SHA: RECORDED_SOURCE, E2E_CLEANUP_SERVICE_IMAGE_DIGEST: RECORDED_IMAGE };
+const recordedEnvironment = { ...environment, E2E_CLEANUP_SERVICE_SOURCE_SHA: RECORDED_SOURCE, E2E_CLEANUP_SERVICE_IMAGE_DIGEST: RECORDED_IMAGE };
 const recordedEnvelope = createCleanupOperationEnvelope(recordedInputs, recordedEnvironment);
 const recordedRecord = {
   schema_version: 3,
@@ -330,6 +330,25 @@ test('bounded canonical worker envelope and execution identity reject malformed 
   }
   assert.throws(() => cleanupExecutionArn(environment.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN.replace(':7', ''), name0));
   assert.throws(() => createCleanupOperationEnvelope(inputs, { ...environment, E2E_CLEANUP_SERVICE_IMAGE_DIGEST: 'latest' }));
+});
+
+test('the envelope binds the derived cleanup source only, never the retired repository variable', () => {
+  // #339: a value left behind in the retired `E2E_CLEANUP_SERVICE_SHA` repository variable cannot
+  // reach the envelope. `E2E_CLEANUP_SERVICE_SOURCE_SHA` is the only source, and only its absence
+  // or a malformed value refuses, over the shared `Service cleanup source refused (…)` sentence.
+  const retired = { ...environment, E2E_CLEANUP_SERVICE_SHA: 'c'.repeat(40) };
+  assert.equal(createCleanupOperationEnvelope(inputs, retired).service_commit_sha,
+    environment.E2E_CLEANUP_SERVICE_SOURCE_SHA);
+  const both = { ...environment, E2E_CLEANUP_SERVICE_SOURCE_SHA: 'd'.repeat(40), E2E_CLEANUP_SERVICE_SHA: 'c'.repeat(40) };
+  assert.equal(createCleanupOperationEnvelope(inputs, both).service_commit_sha, 'd'.repeat(40));
+  assert.throws(() => createCleanupOperationEnvelope(inputs, {
+    E2E_CLEANUP_SERVICE_SHA: 'c'.repeat(40),
+    E2E_CLEANUP_SERVICE_IMAGE_DIGEST: environment.E2E_CLEANUP_SERVICE_IMAGE_DIGEST,
+  }), /Service cleanup source refused \(unset\): value=<absent>/);
+  assert.throws(() => createCleanupOperationEnvelope(inputs, {
+    E2E_CLEANUP_SERVICE_SOURCE_SHA: 'main',
+    E2E_CLEANUP_SERVICE_IMAGE_DIGEST: environment.E2E_CLEANUP_SERVICE_IMAGE_DIGEST,
+  }), /Service cleanup source refused \(malformed\): value="main"/);
 });
 
 test('the scoped Beta worker address is accepted for its own run scope and never for another', () => {

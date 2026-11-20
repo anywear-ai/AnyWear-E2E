@@ -1308,7 +1308,7 @@ test('the production cleanup wrapper passes the absolute deadline to the real cl
     async sleep() {},
   };
   const cleanupEnvironment = {
-    E2E_CLEANUP_SERVICE_SHA: 'a'.repeat(40),
+    E2E_CLEANUP_SERVICE_SOURCE_SHA: 'a'.repeat(40),
     E2E_CLEANUP_SERVICE_IMAGE_DIGEST: `sha256:${'b'.repeat(64)}`,
     BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: 'arn:aws:states:ap-east-1:650880818323:stateMachine:beta-anywear-tester-cleanup:7',
     E2E_SERVICE_CLEANUP_EVIDENCE_PATH: join(directory, 'service-cleanup-operation.json'),
@@ -1814,7 +1814,7 @@ test('the production cleanup wrapper re-checks the pin before the start and star
     runScope: '123-1-0123456789abcdef', users: [{ sub: subject(1), email: stable(0) }],
   }) };
   const cleanupEnvironment = (evidencePath) => ({
-    E2E_CLEANUP_SERVICE_SHA: 'a'.repeat(40),
+    E2E_CLEANUP_SERVICE_SOURCE_SHA: 'a'.repeat(40),
     E2E_CLEANUP_SERVICE_IMAGE_DIGEST: `sha256:${'b'.repeat(64)}`,
     BETA_CLEANUP_STATE_MACHINE_VERSION_ARN: versionArn(7),
     E2E_SERVICE_CLEANUP_EVIDENCE_PATH: evidencePath,

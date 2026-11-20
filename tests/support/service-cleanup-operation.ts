@@ -4,11 +4,11 @@ import { createHash } from 'node:crypto';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { isDeepStrictEqual, promisify } from 'node:util';
+import { readCleanupPair } from '../../scripts/cleanup-source.mjs';
 import { parseStrictJson } from '../../scripts/evidence-contract.mjs';
 import { isBetaWorkerEmailForScope } from './beta-address.ts';
 import type { ServiceCleanupInputs } from './worker-cleanup.js';
 
-const SHA = /^[a-f0-9]{40}$/;
 const DIGEST = /^sha256:[a-f0-9]{64}$/;
 const RUN_SCOPE = /^[1-9][0-9]{0,19}-[1-9][0-9]{0,5}-[a-f0-9]{16}$/;
 /**
@@ -323,10 +323,7 @@ export function createCleanupOperationEnvelope(inputs: ServiceCleanupInputs, env
   if (new Set(identities.map(user => user.email)).size !== users.length || new Set(identities.map(user => user.sub)).size !== users.length) {
     throw new Error('Cleanup request contains duplicate identities');
   }
-  const source = environment.E2E_CLEANUP_SERVICE_SOURCE_SHA ?? environment.E2E_CLEANUP_SERVICE_SHA;
-  const digest = environment.E2E_CLEANUP_SERVICE_IMAGE_DIGEST;
-  if (!source || !SHA.test(source)) throw new Error('Reviewed cleanup source must be a full commit SHA');
-  if (!digest || !DIGEST.test(digest)) throw new Error('Reviewed cleanup image must be an OCI digest');
+  const { serviceCommit: source, imageDigest: digest } = readCleanupPair(environment);
   // The Service envelope keeps `operation_mode` (and its optional
   // `recovery_attempt`) because the Service validator requires the field. E2E
   // always submits the ordinary mode, and never submits an attempt.

@@ -11,7 +11,6 @@ import './evidence-contract.test.mjs';
 // could create an identity no reconcile can attribute, so the guard refuses it before the
 // first AWS call.
 const SHA = 'a'.repeat(40);
-const SERVICE_SHA = 'b'.repeat(40);
 const RUN_ID = '39985391384';
 const ATTEMPT = '2';
 
@@ -33,7 +32,6 @@ function environment(overrides = {}) {
     GITHUB_RUN_ATTEMPT: ATTEMPT,
     AWS_ACCOUNT_ID: '650880818323',
     AWS_REGION: 'ap-east-1',
-    E2E_CLEANUP_SERVICE_SHA: SERVICE_SHA,
     E2E_AWS_ACCOUNT: '650880818323',
     E2E_AWS_PRINCIPAL_ARN: `arn:aws:sts::650880818323:assumed-role/beta-e2e-qualification-role/e2e-${RUN_ID}-${ATTEMPT}`,
     ...overrides,
