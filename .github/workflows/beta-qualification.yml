@@ -549,8 +549,14 @@ jobs:
       E2E_WORKERS: 2
       E2E_WORKER_SLOT_OFFSET: ${{ inputs.worker_slot_offset }}
       E2E_MAX_ACTIVE_ACCOUNTS: 2
-      # One lease per attempt: 2 workers x 3 attempts (initial + two CI retries).
-      E2E_MAX_NEW_ACCOUNTS_PER_RUN: 6
+      # The `@regression` selection holds eight scenarios, but only seven lease a pool
+      # address: `auth-startup` 1, `vto` 3, `wardrobe` 2 and `worker-smoke` 1.
+      # `rejection-contract` leases none — it uses the bare Playwright `request` fixture.
+      # 14 = 7 + one retry round: the seven leases of the attempt plus the same seven for
+      # one retry. Run 44931518368 measured the boundary: six leases succeeded and
+      # `worker-smoke` was refused with `E2E new-account budget exhausted` at the old cap
+      # of 6, so the seventh lease is exactly where 6 runs out.
+      E2E_MAX_NEW_ACCOUNTS_PER_RUN: 14
       # The run's own Playwright JSON report. The qualification record's `test` member is
       # derived from these bytes — the selection, the report digest and one outcome per
       # selected spec — and both artifact lists below retain the report, so the digest the
@@ -871,7 +877,11 @@ jobs:
       E2E_WORKERS: 2
       E2E_WORKER_SLOT_OFFSET: ${{ inputs.worker_slot_offset }}
       E2E_MAX_ACTIVE_ACCOUNTS: 2
-      # One lease per attempt: 2 workers x 3 attempts (initial + two CI retries).
+      # The `@smoke` selection is `auth-startup` and `worker-smoke`: two account-leasing
+      # scenarios per attempt, and nothing else in it consumes an account. 6 already covers
+      # 2 x 3 attempts (initial + two CI retries), which is more than the 2 + one retry
+      # round the `full` arithmetic would justify here, so there is no named need to raise
+      # it and the value stays.
       E2E_MAX_NEW_ACCOUNTS_PER_RUN: 6
 
     steps:
