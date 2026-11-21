@@ -71,15 +71,21 @@ agreeing about the invocations that exist.
 
 ### `tests/vto.spec.ts`
 
+This file declares three scenarios: the end-to-end single-garment try-on classified in the
+table below, and the two composition-path scenarios classified in the two `####` sub-sections
+that follow it. All three carry the same tags, are selected by the same invocation and declare
+the same cleanup contract; they differ in what they assert about the room and the outfit the
+compose step produces.
+
 | Field | Value |
 | --- | --- |
 | Declared title | `Virtual try-on @regression @full-stack` |
 | Policy class | Full deployed system E2E |
 | Tags | `@regression @full-stack` |
-| Intent | One single-garment virtual try-on completes end to end against the deployed Client and Service: the garment reaches terminal `ready`, the base photo is accepted, the generation is accepted with exactly one credit debit, reaches terminal `Complete` with a monotonic state version, returns retrievable image bytes, renders in the Client, and takes no second debit |
+| Intent | One single-garment virtual try-on completes end to end against the deployed Client and Service: the garment reaches terminal `ready`, it is staged from the Fitting Room's `Wardrobe` area into `To try on` and ticked there, survives a removal and re-add, the base photo is accepted, the generation is accepted with exactly one credit debit, reaches terminal `Complete` with a monotonic state version, returns retrievable image bytes, renders in the Client, and takes no second debit |
 | Current caller | The `full` operation of the protected `qualify` entry, through the release-gating selection. `test:smoke` does not select it |
 | Assertion boundary | Deployed Client UI and Service HTTP API together, with the Service's real auto-tagging and VTO provider calls in the path |
-| Actual operation | Leases a synthetic Cognito identity, creates a wardrobe item through the real Client upload flow, uploads one base photo through the Mirror UI, submits one VTO generation with that garment, polls it to terminal `Complete`, retrieves the generated image, and asserts the Client's rendered result |
+| Actual operation | Leases a synthetic Cognito identity, creates a wardrobe item through the real Client upload flow, opens the default fitting room (`GET /fitting-rooms` creates it, so the scenario creates no room), uploads one base photo through the room's own selector, stages the garment from the `Wardrobe` area with `Add <name> to try on`, ticks it in `To try on` with `Select <name>`, removes it with `Remove <name> from try on` and adds it back, then submits one VTO generation with that garment, polls it to terminal `Complete`, retrieves the generated image, and asserts the Client's rendered result |
 | Owner | AnyWear-E2E maintainers |
 | Lifecycle | Current. It is the only end-to-end coverage of the VTO path; the sizing workload that also exercised it is retired by this issue's separate deletion PR |
 | Command | `pnpm test:regression`, and `pnpm test` because the suite step runs the same selection |
@@ -89,8 +95,54 @@ agreeing about the invocations that exist.
 | Evidence level | Qualification, when the complete selection and the pre/post identity checks pass |
 | Disposition | Retain |
 | Cleanup contract | `DirectTeardown` against the attempt's own `run_scope`/`test_scope`: register before the first business side effect, bind the owner subject, capture the created `wardrobe_item`, `base_photo`, `outfit` and `outfit_generation` as they are created, then call `finalize` with the attempt's own authorization — the only terminal entry point. `finalize` deletes the captured refs in schema order, reads every one of them back (one routed `GET` per reference with a read route, and at most one authenticated `GET /vto/base-photos` covering the captured base photos), and only then writes the single acknowledgement, so the record is computed from the per-reference dispositions `removed | already_absent | absent_unattributed | present | unverified` and only `present`/`unverified` withhold `passed`. Absence decides; a delete `404` is recorded as `already_absent`, never as a deletion. The same `finalize` closes the declaration with a `passed` acknowledgement when nothing was captured, and with a `failed`, quarantined one when the attempt holds no bearer token. Independently of the product assertion, a teardown that is not `passed` retains the scope and fails a separate gate. The worker-lease fixture then deletes the Cognito identity and releases the lease |
-| Verification rationale | The product assertion stands alone; teardown is reported beside it and never rewrites it. The terminal wait is a bound on the platform's 900 s VTO recovery floor, not a measurement of observed provider latency, so the scenario does not report the platform's own recovery as a product failure. `retries: 0` is configured, because each attempt spends real provider budget and a failed attempt must not be repeated automatically. The terminal `Complete`, the image bytes, the single debit and the Client render can only be proven by a deployed run |
+| Verification rationale | The product assertion stands alone; teardown is reported beside it and never rewrites it. The terminal wait is a bound on the platform's 900 s VTO recovery floor, not a measurement of observed provider latency, so the scenario does not report the platform's own recovery as a product failure. `retries: 0` is configured, because each attempt spends real provider budget and a failed attempt must not be repeated automatically. The two-area flow is asserted as two different actions: staging a piece through `Add <name> to try on` must not tick it, the staged row's `Select <name>` is what ticks it (`Deselect <name>` with `aria-pressed="true"` afterwards and `1 / 5` in the counter), and `Remove <name> from try on` must leave the wardrobe's own list intact so the same piece can be staged again. The terminal `Complete`, the image bytes, the single debit and the Client render can only be proven by a deployed run |
 | Red result means | A release-gating product failure in the try-on path, or an environment/provider condition. A `Failed` generation fails immediately instead of waiting out the recovery floor |
+
+#### Generate path — one outfit per item set
+
+| Field | Value |
+| --- | --- |
+| Declared title | `Fitting Room generate path composes one outfit per item set @regression @full-stack` |
+| Policy class | Full deployed system E2E |
+| Tags | `@regression @full-stack` |
+| Intent | Composing one item set twice on the render path keeps one outfit for that set: both `POST /vto/generations` answers are `202`, they carry the same `outfit_id` and different `generation_id`s, `GET /outfits` never shows a second outfit for the set, the second attempt appends exactly one `outfit_generations` row to that outfit, and exactly two credits are spent in total |
+| Current caller | The `full` operation of the protected `qualify` entry, through the release-gating selection. `test:smoke` does not select it |
+| Assertion boundary | Deployed Client UI and Service HTTP API together, with the Service's real auto-tagging call and its real VTO provider calls in the path |
+| Actual operation | Leases a synthetic Cognito identity, creates one wardrobe item through the real Client upload flow and waits for terminal `ready`, opens the default fitting room, uploads one base photo through the room's own selector, stages the garment from `Wardrobe` and ticks it in `To try on`, then submits the render path twice for that same ticked set and polls both generations to terminal `Complete` |
+| Owner | AnyWear-E2E maintainers |
+| Lifecycle | Current. It is the only deployed coverage of the composition invariant that one item set has one outfit, and it is admitted here because the attempt is issued by the deployed Client's own compose step — the Client decides between the outfit it already knows and a member list of its own — while the outfit, its row count and the credit balance are read back from the Service, so neither end can be replaced by a mock |
+| Command | `pnpm test:regression`, and `pnpm test` because the suite step runs the same selection |
+| Default trigger | The `full` operation of the `qualify` entry, whose selection this scenario is part of |
+| Cost | External write and paid provider cost: one leased identity, one uploaded garment object, one uploaded base photo, one auto-tagging task and two VTO generations per attempt. Not separately metered |
+| Side effects | Application rows, two uploaded objects, two generated result objects, provider spend, and a Cognito identity |
+| Evidence level | Qualification, when the complete selection and the pre/post identity checks pass |
+| Disposition | Retain |
+| Cleanup contract | The same `DirectTeardown` contract the file's other scenarios declare, against this attempt's own `run_scope`/`test_scope`: register before the first business side effect, bind the owner subject, capture the created `wardrobe_item`, `base_photo`, `outfit` and both `outfit_generation` rows as they are created, then call `finalize` with the attempt's own authorization — the only terminal entry point, which deletes in schema order, reads every reference back and only then writes the single acknowledgement. A teardown that is not `passed` retains the scope and fails a separate gate, and the worker-lease fixture then deletes the Cognito identity and releases the lease |
+| Verification rationale | The product assertion stands alone; teardown is reported beside it and never rewrites it. Both terminal waits reuse the file's recovery-floor bound, so neither wait can report the platform's own recovery as a product failure. The second submit is taken after the Client's primary action is enabled again, which is how the page stops polling the first generation. `generationCount` is read from the `GET /outfits` read model the Wardrobe cards render from, so the scenario states the outfit's own row count without asking for an endpoint the Client never calls. `retries: 0` is configured, because each attempt spends two generations' worth of real provider budget |
+| Red result means | A release-gating product failure in the composition path: a second outfit for one item set, a replayed `generation_id`, a second attempt that adds no row or more than one, or a credit total that is not two. An environment or provider condition is the other reading, and a `Failed` generation fails immediately instead of waiting out the recovery floor |
+
+#### Save path — an outfit without a look
+
+| Field | Value |
+| --- | --- |
+| Declared title | `Fitting Room save path stores an outfit without a look @regression @full-stack` |
+| Policy class | Full deployed system E2E |
+| Tags | `@regression @full-stack` |
+| Intent | Turning the compose step's switch off saves the ticked set without rendering it: `POST /outfits` carries only `wearable_item_ids`, answers `201` with the outfit read model whose `latestGeneration` and `look` are both `null` and whose `generationCount` is `0`, a second save answers `200` with the same `id`, no outfit, `outfit_generations` row or credit moves between the two saves, and the Wardrobe card paints the bundled placeholder with `Generate look` instead of the image-unavailable state |
+| Current caller | The `full` operation of the protected `qualify` entry, through the release-gating selection. `test:smoke` does not select it |
+| Assertion boundary | Deployed Client UI and Service HTTP API together, with the Service's real auto-tagging call in the path and no VTO call at all |
+| Actual operation | Leases a synthetic Cognito identity, creates one wardrobe item through the real Client upload flow and waits for terminal `ready`, opens the default fitting room, stages the garment from `Wardrobe` and ticks it in `To try on`, switches `Try it on now (1 credit)` off, saves twice, then opens the Wardrobe tab and reads the card, its placeholder and the card's own requests |
+| Owner | AnyWear-E2E maintainers |
+| Lifecycle | Current. It is the only deployed coverage of the path that composes an outfit at no cost, and it is admitted here because the request body and the card are the deployed Client's own output — the switch decides what the primary action is — while the outfit read model, its row count and the credit balance are read back from the Service, so neither end can be replaced by a mock |
+| Command | `pnpm test:regression`, and `pnpm test` because the suite step runs the same selection |
+| Default trigger | The `full` operation of the `qualify` entry, whose selection this scenario is part of |
+| Cost | External write and paid provider cost bounded to the tagging call: one leased identity, one uploaded garment object and one auto-tagging task per attempt. The save path itself spends no credit, enqueues no generation and writes no image |
+| Side effects | Application rows, one uploaded object, provider spend for the tagging task, and a Cognito identity |
+| Evidence level | Qualification, when the complete selection and the pre/post identity checks pass |
+| Disposition | Retain |
+| Cleanup contract | The same `DirectTeardown` contract the file's other scenarios declare, against this attempt's own `run_scope`/`test_scope`: register before the first business side effect, bind the owner subject, capture the created `wardrobe_item` and `outfit` as they are created, then call `finalize` with the attempt's own authorization — the only terminal entry point, which deletes in schema order (the outfit before the item that its members reference), reads both references back and only then writes the single acknowledgement. A teardown that is not `passed` retains the scope and fails a separate gate, and the worker-lease fixture then deletes the Cognito identity and releases the lease |
+| Verification rationale | The product assertion stands alone; teardown is reported beside it and never rewrites it. The request body is read from the request the Client actually sent, so a render field would fail the scenario rather than be inferred absent from the response. The never-generated state is distinguished from image-unavailable by its own criterion (`latestGeneration == null && look == null` against `look.generationId` set with `look.url == null`), the card is read from the `GET /outfits` list, and the scenario asserts that rendering it issues no single-outfit read and no generated-look object request. Switching the option is asserted not to change the ticks. `retries: 0` is configured, because the attempt still spends a paid auto-tagging call and a failed attempt must not be repeated automatically |
+| Red result means | A release-gating product failure in the save path: a request that carries a render field, a second outfit for one item set, a credit or generation count that moves, a card that reports a never-rendered outfit as broken, or an image request for a look that does not exist. An environment or provider condition is the other reading |
 
 ### `tests/wardrobe.spec.ts`
 
