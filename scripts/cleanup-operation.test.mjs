@@ -40,6 +40,7 @@ function harness(options = {}) {
   const calls = [];
   const deletes = [];
   const reads = [];
+  const archives = [];
   // One ordered record of every request this teardown made, so the
   // delete -> read-back -> acknowledge order is assertable without wall-clock time.
   const timeline = [];
@@ -73,6 +74,14 @@ function harness(options = {}) {
       timeline.push({ kind: 'delete', path: pathOf(url) });
       return options.deleteStatus ? await options.deleteStatus(url) : 200;
     },
+    // Issue 332 — a wardrobe item is archived before it is deleted. The archive
+    // lands on the timeline between the machine calls and the delete so the order
+    // is assertable without wall-clock time.
+    archiveIo: async (url, authorization) => {
+      archives.push({ url, authorization });
+      timeline.push({ kind: 'archive', path: pathOf(url) });
+      return options.archiveStatus ? await options.archiveStatus(url) : 200;
+    },
     // Every read this teardown issues, in order: the routed GETs and the single
     // base-photo list. An injected `read` decides the answer; the default is the
     // passing one, so a case that does not care about the read-back stays quiet.
@@ -83,7 +92,7 @@ function harness(options = {}) {
       return defaultRead(url);
     },
   });
-  return { teardown, calls, deletes, reads, timeline };
+  return { teardown, calls, deletes, reads, archives, timeline };
 }
 
 function attempt(retryIndex, leaseGeneration, payloads, testInfo = fakeTestInfo()) {
@@ -222,8 +231,14 @@ test('the acknowledge POST is the last machine call and follows every delete and
   // Deletes, then reads, then the single acknowledgement: no interleaving and no
   // request after the acknowledgement.
   const stages = timeline.map((entry) => entry.kind);
+  // Issue 332 — the captured wardrobe item is archived immediately before its own
+  // delete, so the archive step sits between the two deletes that follow it and
+  // never after a read or the acknowledgement.
+  // Schema order is generation, outfit, wardrobe item, base photo, so the archive
+  // precedes the wardrobe item's own delete and nothing follows it but deletes and
+  // read-backs.
   assert.deepEqual(stages, [
-    'machine', 'delete', 'delete', 'delete', 'delete', 'read', 'read', 'read', 'read', 'machine',
+    'machine', 'delete', 'delete', 'archive', 'delete', 'delete', 'read', 'read', 'read', 'read', 'machine',
   ]);
   const acknowledgeAt = timeline.findLastIndex((entry) => entry.kind === 'machine');
   assert.equal(acknowledgeAt, timeline.length - 1, 'the acknowledgement is the final call');
@@ -919,3 +934,35 @@ test('machine auth refuses to sign without its secret', () => {
   assert.throws(() => machineAuthHeaders('operation:register', '{}', {}), /CLEANUP_MACHINE_AUTH_SECRET/);
 });
 
+/**
+ * Issue 332 — the item delete is Storage Box only.
+ *
+ * `DELETE /wardrobe/items/{id}` answers `409 ITEM_NOT_ARCHIVED` for an item in use,
+ * so a teardown that deleted an active item recorded it as still present and
+ * quarantined the scope. The teardown now performs the documented two-step flow:
+ * archive, then delete, and records the archive status when it was needed.
+ */
+test('archives a captured wardrobe item before deleting it', async () => {
+  const { teardown, archives, deletes, timeline } = harness();
+  await teardown.register();
+  teardown.capture('wardrobe_item', 'item-1');
+  const result = await teardown.finalize('passed', 'Bearer token');
+
+  assert.deepEqual(archives.map((entry) => new URL(entry.url).pathname), ['/wardrobe/items/item-1/archive']);
+  assert.deepEqual(deletes.map((entry) => new URL(entry.url).pathname), ['/wardrobe/items/item-1']);
+  assert.deepEqual(timeline.filter((entry) => entry.kind === 'archive' || entry.kind === 'delete'), [
+    { kind: 'archive', path: '/wardrobe/items/item-1/archive' },
+    { kind: 'delete', path: '/wardrobe/items/item-1' },
+  ]);
+  assert.equal(result.evidence.find((record) => record.ref.kind === 'wardrobe_item').delete_status, 200);
+  assert.equal(result.teardown_result, 'passed');
+});
+
+test('archives nothing for a kind that has no Storage Box layer', async () => {
+  const { teardown, archives } = harness();
+  await teardown.register();
+  teardown.capture('outfit', 'outfit-1');
+  await teardown.finalize('passed', 'Bearer token');
+
+  assert.deepEqual(archives, []);
+});

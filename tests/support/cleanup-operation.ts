@@ -188,6 +188,23 @@ export function deleteRouteFor(ref: ResourceRef): string | undefined {
   }
 }
 
+/**
+ * Issue 332 — a wardrobe item's user-facing delete is reachable only from the
+ * Storage Box.
+ *
+ * `DELETE /wardrobe/items/{id}` answers `409 ITEM_NOT_ARCHIVED` while the item is
+ * in use, so a teardown that deletes an active item records it as still present
+ * and quarantines the scope. The documented user flow is archive, then delete, so
+ * the teardown performs the same two steps through the same user-facing routes.
+ *
+ * `POST /wardrobe/items/{id}/archive` is idempotent (`COALESCE` keeps the first
+ * instant), so archiving an item that is already in the box is not an error, and a
+ * `404` there is left to the delete and the absence read-back to attribute.
+ */
+export function archiveRouteFor(ref: ResourceRef): string | undefined {
+  return ref.kind === 'wardrobe_item' ? '/wardrobe/items/' + encodeURIComponent(ref.id) + '/archive' : undefined;
+}
+
 export interface DirectTeardownOptions {
   runScope: string;
   testScope: string;
@@ -210,6 +227,7 @@ export interface DirectTeardownOptions {
   io?: DirectTeardownIo;
   deleteIo?: DirectTeardownDeleteIo;
   readIo?: DirectTeardownReadIo;
+  archiveIo?: DirectTeardownArchiveIo;
 }
 
 /** What one read-back could observe about a captured reference. */
@@ -239,6 +257,8 @@ export interface ReferenceEvidence {
 /** The delete half of one reference's record, before its absence is read back. */
 export interface ReferenceDelete {
   ref: ResourceRef;
+  /** The archive call's status, recorded only when this kind needed one. */
+  archive_status?: number;
   delete_status?: number;
   reason?: string;
 }
@@ -267,6 +287,14 @@ export type DirectTeardownIo = (path: string, init: {
 
 /** Injected transport for the ordinary user-facing DELETE routes. */
 export type DirectTeardownDeleteIo = (url: string, authorization: string) => Promise<number>;
+
+/**
+ * Injected transport for the archive step a wardrobe-item delete needs (#332).
+ *
+ * Omitted, the real request context performs it; the offline suite that supplies
+ * only `deleteIo` keeps driving the delete seam alone.
+ */
+export type DirectTeardownArchiveIo = (url: string, authorization: string) => Promise<number>;
 
 /**
  * Injected transport for the ordinary user-facing read-back routes.
@@ -506,8 +534,27 @@ export class DirectTeardown {
         continue;
       }
       try {
+        // Issue 332 — the wardrobe item delete is Storage Box only, so the
+        // documented user flow archives first. Every other kind needs no pre-step.
+        const archiveRoute = archiveRouteFor(ref);
+        let archiveStatus: number | undefined;
+        if (archiveRoute) {
+          const archiveUrl = this.options.serviceUrl + archiveRoute;
+          if (this.options.archiveIo) archiveStatus = await this.options.archiveIo(archiveUrl, authorization);
+          else if (!this.options.deleteIo) {
+            const response = await this.options.request.post(archiveUrl, {
+              headers: { ...CLIENT_VERSION_HEADERS, Authorization: authorization },
+              data: {},
+            });
+            archiveStatus = response.status();
+          }
+        }
         if (this.options.deleteIo) {
-          deletes.push({ ref, delete_status: await this.options.deleteIo(this.options.serviceUrl + route, authorization) });
+          deletes.push({
+            ref,
+            ...(archiveStatus === undefined ? {} : { archive_status: archiveStatus }),
+            delete_status: await this.options.deleteIo(this.options.serviceUrl + route, authorization),
+          });
           continue;
         }
         const response = await this.options.request.delete(this.options.serviceUrl + route, {
@@ -517,7 +564,11 @@ export class DirectTeardown {
           // also calls is exempt and stays headerless.
           headers: { ...CLIENT_VERSION_HEADERS, Authorization: authorization },
         });
-        deletes.push({ ref, delete_status: response.status() });
+        deletes.push({
+          ref,
+          ...(archiveStatus === undefined ? {} : { archive_status: archiveStatus }),
+          delete_status: response.status(),
+        });
       } catch (error) {
         deletes.push({ ref, reason: error instanceof Error ? error.message : 'unknown error' });
       }
@@ -708,4 +759,3 @@ export class DirectTeardown {
 export function quarantinesScope(teardownResult: TeardownResult): boolean {
   return teardownResult !== 'passed';
 }
-

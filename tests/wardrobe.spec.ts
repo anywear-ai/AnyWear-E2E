@@ -24,6 +24,8 @@ interface WardrobeStatus {
 interface WardrobeItem extends WardrobeStatus {
   name: string | null;
   category: string;
+  /** Issue 332 — the Storage Box instant, or null while the item is in use. */
+  archivedAt: string | null;
 }
 
 /** The acceptance answer one upload confirmation returns. */
@@ -261,22 +263,53 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
     await editedCard.click();
     await expect(details).toBeVisible();
 
-    // #303 replaced the host confirm with an in-page question: the dialog's
-    // Delete only opens it, and nothing is sent until its own Delete is pressed.
-    const deleteControl = details.getByRole('button', { name: 'Delete', exact: true });
-    await expect(deleteControl, 'the Item Details dialog must offer a Delete control')
-      .toBeVisible({ timeout: 10_000 });
+    // Issue 332 — the item lifecycle has two layers, and this dialog offers the
+    // first one. A permanent delete is reachable only from the Storage Box, so the
+    // active item's destructive action is Archive; the dialog offers no delete.
+    const archiveControl = details.getByTestId('item-lifecycle-action');
+    await expect(archiveControl, 'the Item Details dialog must offer the item lifecycle action (Archive)')
+      .toHaveText('Archive', { timeout: 10_000 });
+    await expect(
+      details.getByRole('button', { name: 'Delete', exact: true }),
+      'the active item dialog must not offer the retired permanent delete',
+    ).toHaveCount(0);
+
+    const archiveUrl = new URL(`${ownedItemUrl}/archive`).pathname;
+    const [archived] = await Promise.all([
+      page.waitForResponse(serviceJson({ method: 'POST', path: archiveUrl }), { timeout: 30_000 }),
+      archiveControl.click({ timeout: 10_000 }),
+    ]);
+    expect(archived.status()).toBe(200);
+    await expect(details).not.toBeVisible();
+    // The item left the active list but its row survives, with the Storage Box
+    // instant recorded.
+    await expect(editedCard).toHaveCount(0);
+    const archivedItem = await page.request.get(ownedItemUrl, { headers });
+    expect(archivedItem.status()).toBe(200);
+    expect((await readServiceJson<WardrobeItem>(archivedItem)).archivedAt).toBeTruthy();
+
+    const activeAfterArchive = await page.request.get(`${serviceUrl}/wardrobe`, { headers });
+    expect(activeAfterArchive.status()).toBe(200);
+    expect((await readServiceJson<WardrobeItem[]>(activeAfterArchive)).map((item) => item.id))
+      .not.toContain(createdItemId);
+
+    // The Storage Box is the only view that offers the permanent delete.
+    await page.getByRole('tab', { name: 'Storage Box', exact: true }).click();
+    const storedCard = page.getByRole('button', { name: `View ${editedItemName} details`, exact: true });
+    await expect(storedCard).toHaveCount(1, { timeout: 15_000 });
+    const deleteControl = page.getByRole('button', { name: `Delete ${editedItemName} permanently`, exact: true });
+    await expect(deleteControl, 'a Storage Box card must offer the permanent delete')
+      .toBeVisible({ timeout: 15_000 });
     await deleteControl.click({ timeout: 10_000 });
 
-    const deleteQuestion = details.getByRole('group', { name: 'Delete this item?', exact: true });
-    await expect(deleteQuestion, 'pressing Delete must open the in-page "Delete this item?" question')
-      .toBeVisible({ timeout: 10_000 });
-    const confirmDelete = deleteQuestion.getByRole('button', { name: 'Delete', exact: true });
-    await expect(confirmDelete, 'the delete question must offer an enabled Delete affirmative')
-      .toBeEnabled({ timeout: 10_000 });
+    const confirmDialog = page.getByRole('dialog', { name: 'Delete this item permanently?', exact: true });
+    await expect(confirmDialog, 'the permanent delete must ask before sending').toBeVisible({ timeout: 10_000 });
+    // This item is in no outfit, so the preview is empty and confirmation is
+    // enabled immediately; nothing is sent until it is pressed.
+    const confirmDelete = confirmDialog.getByRole('button', { name: 'Delete permanently', exact: true });
+    await expect(confirmDelete, 'the confirmation must become enabled once the dependency preview is complete')
+      .toBeEnabled({ timeout: 15_000 });
 
-    // Armed only once the control is proven operable, and before the one click
-    // that can send the request.
     const [deleted] = await Promise.all([
       page.waitForResponse(
         serviceJson({ method: 'DELETE', path: new URL(ownedItemUrl).pathname }),
@@ -285,8 +318,8 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
       confirmDelete.click({ timeout: 10_000 }),
     ]);
     expect(deleted.status()).toBe(200);
-    await expect(details).not.toBeVisible();
-    await expect(editedCard).toHaveCount(0);
+    await expect(confirmDialog).not.toBeVisible();
+    await expect(storedCard).toHaveCount(0);
     const deletedItem = await page.request.get(ownedItemUrl, { headers });
     expect(deletedItem.status()).toBe(404);
 
@@ -294,6 +327,11 @@ test.describe('Wardrobe Management @regression @full-stack', () => {
     expect(finalWardrobe.status()).toBe(200);
     const finalItems = await readServiceJson<WardrobeItem[]>(finalWardrobe);
     expect(finalItems.map((item) => item.id)).not.toContain(createdItemId);
+    // The Storage Box no longer lists it either: the row is gone, not hidden.
+    const finalStorage = await page.request.get(`${serviceUrl}/wardrobe?archive_status=archived`, { headers });
+    expect(finalStorage.status()).toBe(200);
+    expect((await readServiceJson<WardrobeItem[]>(finalStorage)).map((item) => item.id))
+      .not.toContain(createdItemId);
     for (const baselineItem of baselineItems) {
       expect(finalItems.find((item) => item.id === baselineItem.id)).toMatchObject({
         id: baselineItem.id,
