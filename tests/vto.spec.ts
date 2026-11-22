@@ -159,6 +159,10 @@ async function uploadTaggedGarment(
  * `POST /fitting-rooms`. The default room is first in the Service's order, and the two
  * areas it renders are named regions whose headings are exactly `Wardrobe` and
  * `To try on`; the scenarios scope every locator to one of them.
+ *
+ * The opened room's name is asserted to be exactly `Default Fitting Room`, the name the
+ * Service gives a room it creates for the caller, so a deploy that skipped the renaming
+ * data pass fails here on the old label instead of passing quietly with it.
  */
 async function openFittingRoom(page: Page, serviceJson: ServiceJson): Promise<FittingRoom> {
   const roomsResponse = page.waitForResponse(serviceJson({ method: 'GET', path: '/fitting-rooms' }));
@@ -170,6 +174,7 @@ async function openFittingRoom(page: Page, serviceJson: ServiceJson): Promise<Fi
   expect(fittingRooms.length).toBeGreaterThanOrEqual(1);
   const [opened] = fittingRooms;
   expect(opened.isDefault).toBe(true);
+  expect(opened.name).toBe('Default Fitting Room');
   await expect(page.getByRole('region', { name: 'Wardrobe' }).getByRole('heading', { name: 'Wardrobe', level: 2 })).toBeVisible();
   await expect(page.getByRole('region', { name: 'To try on' }).getByRole('heading', { name: 'To try on', level: 2 })).toBeVisible();
   return opened;
@@ -184,20 +189,26 @@ function toTryOnArea(page: Page) {
  * Stage one piece in `To try on` and tick it there.
  *
  * The two steps are two different actions on the delivered surface and both are
- * assertions: the `Wardrobe` area's `Add <name> to try on` stages a piece without ticking
- * it, and the staged row's own `Select <name>` control is what ticks it. The tick is then
- * read back through the same control's `Deselect` name and `aria-pressed` state, and the
- * `N / 5` counter says the tick sits inside the per-try-on bound.
+ * assertions: the `Wardrobe` area's garment tile is the staging control — it carries the
+ * image, answers `aria-pressed="false"`, and after the press its name flips to
+ * `Remove <name> from try on` with `aria-pressed="true"` — and staging ticks nothing. The
+ * tick is the `To try on` area's own toggle tile, named `Select <name>` until it is pressed
+ * and `Selected <name>` afterwards, where it carries `aria-pressed="true"`; the `N / 5`
+ * counter says the tick sits inside the per-try-on bound.
  */
 async function stageAndSelect(page: Page, label: string): Promise<void> {
-  const addToTryOn = page.getByRole('region', { name: 'Wardrobe' })
-    .getByRole('button', { name: `Add ${label} to try on`, exact: true });
-  await expect(addToTryOn).toHaveCount(1, { timeout: 15_000 });
-  await addToTryOn.click();
-  const select = toTryOnArea(page).getByRole('button', { name: `Select ${label}`, exact: true });
-  await expect(select).toHaveCount(1, { timeout: 15_000 });
-  await select.click();
-  await expect(toTryOnArea(page).getByRole('button', { name: `Deselect ${label}`, exact: true }))
+  const wardrobeArea = page.getByRole('region', { name: 'Wardrobe' });
+  const stageTile = wardrobeArea.getByRole('button', { name: `Add ${label} to try on`, exact: true });
+  await expect(stageTile).toHaveCount(1, { timeout: 15_000 });
+  await expect(stageTile).toHaveAttribute('aria-pressed', 'false');
+  await expect(stageTile.locator('img')).toHaveCount(1);
+  await stageTile.click();
+  await expect(wardrobeArea.getByRole('button', { name: `Remove ${label} from try on`, exact: true }))
+    .toHaveAttribute('aria-pressed', 'true');
+  const selectTile = toTryOnArea(page).getByRole('button', { name: `Select ${label}`, exact: true });
+  await expect(selectTile).toHaveCount(1, { timeout: 15_000 });
+  await selectTile.click();
+  await expect(toTryOnArea(page).getByRole('button', { name: `Selected ${label}`, exact: true }))
     .toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByTestId('to-try-on-counter')).toHaveText('1 / 5');
 }
@@ -397,13 +408,13 @@ test.describe('Virtual try-on @regression @full-stack', () => {
     const basePhotoId = await uploadBasePhoto(page, serviceJson);
     captured.push({ kind: 'base_photo', id: basePhotoId });
 
-    // Pick the piece from `Wardrobe` into `To try on` and tick it there. Adding stages a
-    // piece — it does not try it on — so the tick is the staged row's own control.
+    // Pick the piece from `Wardrobe` into `To try on` and tick it there. Pressing the garment
+    // tile stages a piece — it does not try it on — so the tick is that area's own tile toggle.
     await stageAndSelect(page, garment.label);
 
     // Removal touches only this room's staged row: the piece stays in the wardrobe, and
-    // adding it back is one click on the same card. Exercised here because the composed set
-    // has to survive a removal, and the add-back below is what the submit uses.
+    // adding it back is one press on the same `Wardrobe` tile. Exercised here because the
+    // composed set has to survive a removal, and the add-back below is what the submit uses.
     await toTryOnArea(page).getByRole('button', { name: `Remove ${garment.label} from try on`, exact: true }).click();
     await expect(toTryOnArea(page).getByRole('button', { name: `Select ${garment.label}`, exact: true }))
       .toHaveCount(0, { timeout: 15_000 });
@@ -575,7 +586,7 @@ test.describe('Virtual try-on @regression @full-stack', () => {
       await expect(tryItOnNow).toHaveAttribute('aria-checked', 'true');
       await tryItOnNow.click();
       await expect(tryItOnNow).toHaveAttribute('aria-checked', 'false');
-      await expect(toTryOnArea(page).getByRole('button', { name: `Deselect ${garment.label}`, exact: true }))
+      await expect(toTryOnArea(page).getByRole('button', { name: `Selected ${garment.label}`, exact: true }))
         .toHaveAttribute('aria-pressed', 'true');
       const saveButton = page.getByRole('button', { name: 'Save outfit', exact: true });
       await expect(saveButton).toBeEnabled();
