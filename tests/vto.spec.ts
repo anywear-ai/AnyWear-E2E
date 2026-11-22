@@ -161,8 +161,10 @@ async function uploadTaggedGarment(
  * `To try on`; the scenarios scope every locator to one of them.
  *
  * The opened room's name is asserted to be exactly `Default Fitting Room`, the name the
- * Service gives a room it creates for the caller, so a deploy that skipped the renaming
- * data pass fails here on the old label instead of passing quietly with it.
+ * Service gives the room its creating read makes for a caller that has none. This proves the
+ * create path on a freshly leased account; it does not exercise the one-time rename of
+ * pre-existing default rooms, which needs a room stored under the old label and so cannot
+ * exist in this scenario's account.
  */
 async function openFittingRoom(page: Page, serviceJson: ServiceJson): Promise<FittingRoom> {
   const roomsResponse = page.waitForResponse(serviceJson({ method: 'GET', path: '/fitting-rooms' }));
