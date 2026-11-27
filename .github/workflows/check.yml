@@ -11,6 +11,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # The merge queue's serial re-test: the same checks run on the queue's temporary
+  # branch (main plus every queued PR ahead of this one), so a combination that is
+  # green separately but breaks together fails before it lands on main.
+  merge_group:
+    branches: [main]
 
 permissions:
   contents: read
