@@ -65,8 +65,9 @@ Run install and build commands from this repository.
   `CLIENT_VERSION_UNSUPPORTED` while admitting one at it. Do not add a committed file that
   describes the deployed revisions; that is what #180 removed.
 - The release gate's verdict is the `full` run itself. Its run name carries the operation, the
-  trigger and the expected Service commit (plus the dispatching run URL, which every dispatch
-  must supply); the `preflight` step summary states the live Client and Service revisions, the
+  trigger and the expected Service commit, plus the dispatching run URL when a workflow
+  dispatched the gate and the `@<actor>` that started it when a person did; the `preflight`
+  step summary states the live Client and Service revisions, the
   image digest, the minimum Client version and the immutable Service release. The run re-reads
   both online identities after the suite, so a mismatch or a deployment change cannot gate the
   tuple. The
@@ -149,9 +150,11 @@ Run install and build commands from this repository.
   that is not this dispatch's `dispatched_by` while that run's hold job (`e2e-hold` for
   `mutate.yml`, `hold` for the scheduled entry) is nonterminal. An unreadable list warns and
   admits. The automated dispatches (`deploy-gate`, `deploy-smoke`, `scheduled`) run inside
-  the writer's held run and skip the read, so a queued writer cannot refuse them. A dispatch
-  that names its own writer run in `dispatched_by` is admitted by that same one comparison;
-  do not add a second exemption path.
+  the writer's held run and skip the read, so a queued writer cannot refuse them. Only
+  `schedule.yml`'s `release-gate` child names its own writer run and is admitted by that one
+  comparison; a hand dispatch (`manual`, and a direct `release-gate`) carries no
+  `dispatched_by` at all, so it can exempt nothing and is admitted only while no writer holds
+  the tuple; do not add a second exemption path.
 - Attribution follows the creator, not the address (#217). Every protected credential step
   assumes `beta-e2e-qualification-role` with
   `role-session-name: e2e-${{ github.run_id }}-${{ github.run_attempt }}`, and
