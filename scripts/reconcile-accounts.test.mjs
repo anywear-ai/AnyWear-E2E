@@ -38,6 +38,8 @@ import {
   validateReconcileRecord,
   E2E_REPOSITORY_ID,
   LIFECYCLE_FILE_MAX_BYTES,
+  LIFECYCLE_WORKFLOW_PATH,
+  LIFECYCLE_WORKFLOW_PATHS,
   RECONCILE_ARTIFACTS_PER_DAY,
   RECONCILE_CLOUDTRAIL_MARGIN_MS,
   RECONCILE_MAX_USERS_PER_REQUEST,
@@ -160,7 +162,7 @@ function artifactFixture(index, { runId = 123, attempt = 1, files = ['account-bu
       workflow_run: { id: runId, head_branch: headBranch, head_sha: HEAD_SHA, repository_id: E2E_REPOSITORY_ID, head_repository_id: E2E_REPOSITORY_ID },
     },
     entries,
-    run: { path: '.github/workflows/beta-qualification.yml', event: 'workflow_dispatch', head_branch: 'main', head_sha: HEAD_SHA, ...run },
+    run: { path: '.github/workflows/beta-e2e.yml', event: 'workflow_dispatch', head_branch: 'main', head_sha: HEAD_SHA, ...run },
   };
 }
 
@@ -215,7 +217,7 @@ function reconcileArtifactFixture(index, { runId = 124, attempt = 1, createdAt =
       digest: `sha256:${'b'.repeat(64)}`,
       workflow_run: { id: runId, head_branch: headBranch, head_sha: HEAD_SHA, repository_id: E2E_REPOSITORY_ID, head_repository_id: E2E_REPOSITORY_ID } },
     entries,
-    run: { path: '.github/workflows/beta-qualification.yml', event: 'workflow_dispatch', head_branch: 'main', head_sha: HEAD_SHA, ...run },
+    run: { path: '.github/workflows/beta-e2e.yml', event: 'workflow_dispatch', head_branch: 'main', head_sha: HEAD_SHA, ...run },
   };
 }
 
@@ -499,6 +501,20 @@ test('a lifecycle artifact is authoritative only when it is bound to the protect
   // The cached run lookup must show the protected workflow dispatch at the artifact's head. A
   // readable mismatch is a verdict, not an exception: the artifact is ignored and counted later.
   assert.deepEqual(lifecycleWorkflowRunBinding(fixture.run, HEAD_SHA), { bound: true });
+  // #358: the gate entry was renamed, so the accepted set binds both the current path and the
+  // retired pre-rename path. The retired literal is design exception ④: it must stay until the
+  // 7-day lookback window (90 days for the migration dispatch) holds no pre-rename artifact.
+  assert.equal(LIFECYCLE_WORKFLOW_PATH, '.github/workflows/beta-e2e.yml');
+  assert.deepEqual([...LIFECYCLE_WORKFLOW_PATHS],
+    ['.github/workflows/beta-e2e.yml', '.github/workflows/beta-qualification.yml']);
+  for (const path of LIFECYCLE_WORKFLOW_PATHS) {
+    assert.deepEqual(lifecycleWorkflowRunBinding({ ...fixture.run, path }, HEAD_SHA), { bound: true }, path);
+  }
+  // The retired path is the explicit exception, so it is pinned on its own too: the default
+  // fixtures use the current path, and only this assertion (and the runbook) name the retired
+  // one as still bound.
+  assert.deepEqual(lifecycleWorkflowRunBinding({ ...fixture.run, path: '.github/workflows/beta-qualification.yml' }, HEAD_SHA),
+    { bound: true }, 'a pre-rename lifecycle artifact stays bound (design exception 4)');
   for (const [patch, reason] of [
     [{ path: '.github/workflows/other.yml' }, 'path'],
     [{ event: 'schedule' }, 'event'],
@@ -1142,7 +1158,7 @@ test('the artifact read is bounded at nine per lookback day, at both lookback bo
     io: {
       ...migrationHarness.io,
       async listArtifacts() { return Array.from({ length: 64 }, (_, index) => diagnostics(index).entry); },
-      async getWorkflowRun() { return { path: '.github/workflows/beta-qualification.yml', event: 'workflow_dispatch', head_branch: 'main', head_sha: HEAD_SHA }; },
+      async getWorkflowRun() { return { path: '.github/workflows/beta-e2e.yml', event: 'workflow_dispatch', head_branch: 'main', head_sha: HEAD_SHA }; },
       async readArtifact() { return [{ name: 'service-cleanup-run.json', size: 10 }]; },
     },
     now: NOW, runIdentity, window: migration, environment: {},
@@ -1293,7 +1309,7 @@ test('the migration allowance is derived from the recorded window and no other c
   // migration generation, and the protected entry exposes no input that selects it.
   const teardown = readFileSync(new URL('./cleanup-worker-accounts.mjs', import.meta.url), 'utf8');
   assert.equal(teardown.includes('migrationGeneration'), false);
-  const workflow = readFileSync(new URL('../.github/workflows/beta-qualification.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../.github/workflows/beta-e2e.yml', import.meta.url), 'utf8');
   assert.doesNotMatch(workflow, /migration_generation|MIGRATION_GENERATION/);
   const reconcile = readFileSync(new URL('./reconcile-accounts.mjs', import.meta.url), 'utf8');
   assert.match(reconcile, /lookbackDaysOfWindow\(window\) === RECONCILE_MIGRATION_WINDOW_DAYS/);

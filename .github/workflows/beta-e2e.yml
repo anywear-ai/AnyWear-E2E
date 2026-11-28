@@ -1,0 +1,1026 @@
+name: Beta E2E gate
+# AnyWear #358: this run *is* the gate verdict. A green `full` run whose name states the
+# operation, the trigger, the expected Service commit (`-` when none was supplied) and the
+# dispatching run is the whole release decision: there is no ledger artifact, no `record` job
+# and no cross-repository record lookup. The verdict words are the run's own `conclusion`.
+#
+# The run name is a cross-repository read contract: `AnyWear-Infra`'s `e2e-admission.mjs`
+# filters its repository run list by the `Beta E2E gate: full` prefix, and its `e2e-hold` job
+# reads this run's URL back from its own dispatch. Keep the ` · ` separators and the four
+# segments exactly as they are.
+run-name: "Beta E2E gate: ${{ inputs.operation }} · ${{ inputs.trigger }} · ${{ inputs.expected_service_commit || '-' }} · by ${{ inputs.dispatched_by }}"
+
+# The E2E deployable unit's single manual entry: the gate. One protected dispatch surface
+# carries three operations — `full` (the release gate), `smoke` (deployed diagnostic) and
+# `reconcile` (automatic leftover expiry) — and it is also dispatched by other workflows: a
+# deployment smoke hook (`trigger=deploy-smoke`), the deploy chain's gate
+# (`trigger=deploy-gate`, #226), the release-gate entry (`trigger=release-gate`) and, since
+# #217, a daily account-reconcile dispatch (`trigger=scheduled`) that #344 moved into
+# `AnyWear-Infra`'s scheduled entry.
+#
+# #358: the trigger values are the gate wording (`deploy-gate`/`release-gate`). Until
+# `AnyWear-Infra`'s step 4 merges and dispatches the new values, this entry accepts the two
+# retired ones (`deploy-qualify`/`release-qualify`) as well; the step that removes them is
+# this issue's step 5, and the input options and the preflight validator move together.
+#
+# #217: leftover data is bounded by time, not quarantined, and the manual `recover` exit is
+# removed. The `reconcile` job runs before every gate suite and as its own dispatched
+# operation. It reads the previous seven days' `beta-account-lifecycle-*` /
+# `beta-smoke-account-lifecycle-*` manifests and the CloudTrail `AdminCreateUser` history,
+# replays the exact-reference Service cleanup, deletes the identity by its immutable
+# username, reads absence back, and writes an `anywear_e2e_account_reconcile` v1 record. A
+# teardown that cannot prove deletion records its identity `retained` with a `reconcileBy`
+# bound and still fails its own run.
+#
+# #180: the gate no longer reads a committed compatibility file. It reads the live deployed
+# tuple (Client `build-metadata.json`, Service `/health`), compares it with the dispatch
+# expectation, and verifies the live Service commit resolves to an immutable Service release.
+# The credential-free preflight performs those checks before any credential job; `full`
+# repeats them before it assumes AWS credentials and re-reads the identity after the suite.
+#
+# Separation between the three operations lives in the signed `operation` field, not in a
+# workflow-file boundary: only `full` runs the release-gating suite, and `smoke` and
+# `reconcile` can neither produce nor withhold that run's verdict.
+# `execution-guard.mjs` maps each operation to this one entry and refuses an operation that
+# was not stated explicitly.
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Gate operation: full (release gate), smoke (diagnostic) or reconcile (leftover expiry)'
+        required: true
+        type: choice
+        options: [full, smoke, reconcile]
+      expected_service_commit:
+        # #180: supplied by the deploy chain (`deploy-gate`, #226) or by an operator who
+        # re-runs the gate (`release-gate` or a manual `full`). Only `full` compares it with
+        # the live Service commit, and every other operation refuses it. A `deploy-gate`
+        # dispatch without one is refused in the preflight.
+        description: Expected live Service commit (40-hex); optional, and only operation full accepts it
+        required: false
+        type: string
+      expected_client_commit:
+        description: Expected live Client source commit (40-hex); optional, and only operation full accepts it
+        required: false
+        type: string
+      trigger:
+        # The trigger is evidence, not a permission: the preflight validates the exact
+        # combination with the operation and the dispatch inputs.
+        # #358: `deploy-qualify` and `release-qualify` are the retired values. They stay in
+        # this closed set until AnyWear-Infra's step 4 merges and dispatches the gate values;
+        # this issue's step 5 deletes them from here and from the preflight together.
+        description: 'Gate trigger: manual, deploy-smoke (smoke only), deploy-gate (full only), release-gate (full only) or scheduled (reconcile only); deploy-qualify and release-qualify are the retired spellings accepted until the dispatcher renames them'
+        required: false
+        default: manual
+        type: choice
+        options: [manual, deploy-smoke, deploy-gate, release-gate, scheduled, deploy-qualify, release-qualify]
+      dispatched_by:
+        # AnyWear #358: required for every dispatch, because the run name renders it as its
+        # fourth segment and `AnyWear-Meta` ADR-0027 §4 pins that name as a machine-read
+        # contract. A dispatch without it would render `by ` and produce an unparseable name,
+        # so the preflight refuses it for every trigger instead of falling back to an actor.
+        description: HTTPS URL of the run that dispatched this gate; required for every dispatch because it is part of the run name
+        required: true
+        type: string
+      worker_slot_offset:
+        description: First captured worker slot (each operation allocates two; choose unused slots)
+        required: false
+        default: 0
+        type: number
+      reconcile_lookback_days:
+        # #217: 7 is the ordinary lookback. 90 is the one recorded migration dispatch, which
+        # reads the whole artifact retention and must precede the removals; only the reconcile
+        # operation accepts it, and the preflight refuses any other value.
+        description: 'Reconcile lookback in whole days: 7 (ordinary) or 90 (one migration dispatch); only operation reconcile accepts it'
+        required: false
+        type: choice
+        options: ['7', '90']
+        default: '7'
+
+permissions:
+  contents: read
+
+# The single protected deployment account. These are workflow constants, not
+# environment-scoped repository variables: the environment-free `preflight` and its
+# execution guard resolve the account and region before any job enters the `beta`
+# environment. No job may shadow them, and environment-only values stay in the jobs that
+# declare `environment: beta`.
+#
+# #180: the two public Beta endpoints are workflow constants for the same reason. The
+# preflight must read the live tuple before any credential job, and a job without
+# `environment: beta` cannot resolve the environment-scoped BETA_CLIENT_URL and
+# BETA_SERVICE_URL. Every job consumes these constants, so the preflight comparison and the
+# suite name the same endpoints. They are the current `beta` environment values; if a
+# CloudFront distribution is ever recreated, these constants move with it in the same
+# reviewed change (the environment-scoped copies are otherwise unused, and moving them is an
+# owner setting action, not part of a dispatch).
+env:
+  AWS_ACCOUNT_ID: '650880818323'
+  AWS_REGION: 'ap-east-1'
+  E2E_CLIENT_URL: 'https://d2rztl7o0y7rf8.cloudfront.net'
+  E2E_SERVICE_URL: 'https://d1pfqujqt29n11.cloudfront.net'
+
+concurrency:
+  group: beta-e2e-account-pool
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  # The gate that runs before any credential job. It holds no AWS credentials, declares no
+  # environment, and verifies the source, the operation/trigger combination, and the live
+  # deployed tuple — identity against the dispatch expectation, supported-Client floor and
+  # the immutable Service release — through the read-only Service App token. Every
+  # credential job `needs` it.
+  preflight:
+    name: Verify the protected gate source and live tuple
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      # The gate that authorizes the credential jobs is the gate that validated the
+      # operation: the operation jobs read this output, not the raw dispatch input.
+      operation: ${{ steps.operation-scope.outputs.operation }}
+      reviewed_service_commit: ${{ steps.live-identity.outputs.reviewed_service_commit }}
+      reviewed_service_image_digest: ${{ steps.live-identity.outputs.reviewed_service_image_digest }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      E2E_STAGE: beta
+      E2E_OPERATION: ${{ inputs.operation }}
+      E2E_EXTERNAL_SERVERS: true
+      ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
+
+    steps:
+      - name: Checkout E2E sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The entry is one dispatch surface, so the operation and the inputs that belong to
+      # another operation are refused here rather than by file presence. The expected commits
+      # are accepted only by `full`; and the trigger fixes which operation and inputs it
+      # may accompany (#180).
+      - name: Validate the dispatch operation, trigger and input scope
+        id: operation-scope
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          TRIGGER: ${{ inputs.trigger }}
+          EXPECTED_SERVICE_COMMIT: ${{ inputs.expected_service_commit }}
+          EXPECTED_CLIENT_COMMIT: ${{ inputs.expected_client_commit }}
+          DISPATCHED_BY: ${{ inputs.dispatched_by }}
+          WORKER_SLOT_OFFSET: ${{ inputs.worker_slot_offset }}
+          RECONCILE_LOOKBACK_DAYS: ${{ inputs.reconcile_lookback_days }}
+        run: |
+          case "$OPERATION" in
+            full|smoke|reconcile) ;;
+            *) echo "::error::Unknown gate operation '$OPERATION'"; exit 1 ;;
+          esac
+          # #217: the reconcile operation owns no worker slot, so a slot offset on it is a
+          # dispatch mistake rather than an allocation.
+          if [[ "$OPERATION" == reconcile && "$WORKER_SLOT_OFFSET" != 0 ]]; then
+            echo "::error::operation reconcile accepts no worker_slot_offset (got '$WORKER_SLOT_OFFSET')"
+            exit 1
+          fi
+          # #217: the lookback is a closed set. 90 is the one migration dispatch over the
+          # artifact retention, and only the reconcile operation accepts it; 7 is the ordinary
+          # window every operation and trigger uses.
+          case "$RECONCILE_LOOKBACK_DAYS" in
+            7|90) ;;
+            *) echo "::error::reconcile_lookback_days must be 7 or 90 (got '$RECONCILE_LOOKBACK_DAYS')"; exit 1 ;;
+          esac
+          if [[ "$OPERATION" != reconcile && "$RECONCILE_LOOKBACK_DAYS" != 7 ]]; then
+            echo "::error::reconcile_lookback_days is only accepted by operation reconcile"
+            exit 1
+          fi
+          # #180/#358: the dispatch trigger is a closed combination with the operation, the
+          # expected commits, the worker slot offset and the dispatching run URL. The two
+          # retired spellings (`release-qualify`, `deploy-qualify`) are accepted beside the
+          # gate values until AnyWear-Infra's step 4 merges; this issue's step 5 deletes them
+          # from this validator and from the `trigger` input together.
+          case "$TRIGGER" in
+            manual)
+              # #358: `manual` carries no trigger-specific rule. It used to refuse a
+              # `dispatched_by`, which the run-name contract now requires from every dispatch;
+              # the URL itself is validated for every trigger below.
+              ;;
+            deploy-smoke)
+              if [[ "$OPERATION" != smoke ]]; then
+                echo "::error::trigger deploy-smoke requires operation smoke (got '$OPERATION')"
+                exit 1
+              fi
+              if [[ -n "$EXPECTED_SERVICE_COMMIT$EXPECTED_CLIENT_COMMIT" ]]; then
+                echo "::error::trigger deploy-smoke accepts no expected commits; the deployment smoke hook names none"
+                exit 1
+              fi
+              if [[ "$WORKER_SLOT_OFFSET" != 0 ]]; then
+                echo "::error::trigger deploy-smoke requires worker_slot_offset 0 (got '$WORKER_SLOT_OFFSET')"
+                exit 1
+              fi
+              ;;
+            release-gate|release-qualify)
+              if [[ "$OPERATION" != full ]]; then
+                echo "::error::trigger $TRIGGER requires operation full (got '$OPERATION')"
+                exit 1
+              fi
+              if [[ -z "$EXPECTED_SERVICE_COMMIT" ]]; then
+                echo "::error::trigger $TRIGGER requires expected_service_commit"
+                exit 1
+              fi
+              if [[ "$WORKER_SLOT_OFFSET" != 0 ]]; then
+                echo "::error::trigger $TRIGGER requires worker_slot_offset 0 (got '$WORKER_SLOT_OFFSET')"
+                exit 1
+              fi
+              ;;
+            deploy-gate|deploy-qualify)
+              # #226: the deploy chain's gate names the Service commit it deployed. It is the
+              # `full` the Infra `e2e-hold` job dispatches, so a dispatch with any other
+              # operation, no expected commit or a displaced worker slot is a mistake refused
+              # here, before the reconcile job or the suite. The dispatching Infra run URL is
+              # required by the `dispatched_by` rule below, like every other trigger.
+              if [[ "$OPERATION" != full ]]; then
+                echo "::error::trigger $TRIGGER requires operation full (got '$OPERATION')"
+                exit 1
+              fi
+              if [[ -z "$EXPECTED_SERVICE_COMMIT" ]]; then
+                echo "::error::trigger $TRIGGER requires expected_service_commit"
+                exit 1
+              fi
+              if [[ "$WORKER_SLOT_OFFSET" != 0 ]]; then
+                echo "::error::trigger $TRIGGER requires worker_slot_offset 0 (got '$WORKER_SLOT_OFFSET')"
+                exit 1
+              fi
+              ;;
+            scheduled)
+              # #217/#344: the daily account-reconcile dispatch belongs to `AnyWear-Infra`'s
+              # scheduled entry, which dispatches this entry because the execution guard
+              # requires `workflow_dispatch` and a `schedule` event would fail closed. It may
+              # only ask for the reconcile operation. This repository keeps no schedule entry
+              # of its own: the daily dispatch has one starter, in the writer repository.
+              if [[ "$OPERATION" != reconcile ]]; then
+                echo "::error::trigger scheduled requires operation reconcile (got '$OPERATION')"
+                exit 1
+              fi
+              if [[ "$WORKER_SLOT_OFFSET" != 0 ]]; then
+                echo "::error::trigger scheduled requires worker_slot_offset 0 (got '$WORKER_SLOT_OFFSET')"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Unknown gate trigger '$TRIGGER'"
+              exit 1
+              ;;
+          esac
+          # #358: every dispatch names the run that dispatched it, because the run name renders
+          # that URL as its fourth segment (ADR-0027 §4) and the operator admission reads it as
+          # its one exemption comparison. A missing or non-HTTPS value is refused here for
+          # every trigger, so the name can never be emitted with an empty segment.
+          if [[ ! "$DISPATCHED_BY" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "::error::trigger $TRIGGER requires dispatched_by as the HTTPS URL of the dispatching run (got '$DISPATCHED_BY')"
+            exit 1
+          fi
+          # Both expected commits are optional, and only the release-gating operation may
+          # compare them with the live deployment.
+          if [[ "$OPERATION" != full ]]; then
+            for name in EXPECTED_SERVICE_COMMIT EXPECTED_CLIENT_COMMIT; do
+              if [[ -n "${!name}" ]]; then
+                echo "::error::$name is only accepted by operation full"
+                exit 1
+              fi
+            done
+          fi
+          for name in EXPECTED_SERVICE_COMMIT EXPECTED_CLIENT_COMMIT; do
+            if [[ -n "${!name}" && ! "${!name}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::$name must be a full lowercase 40-character commit SHA"
+              exit 1
+            fi
+          done
+          # Publish the validated operation. The credential jobs gate on this output, so the
+          # job that authorizes them is the job that checked the operation and its inputs.
+          echo "operation=$OPERATION" >> "$GITHUB_OUTPUT"
+
+      - name: Check E2E source
+        run: pnpm check
+
+      - name: Require protected execution
+        run: node scripts/execution-guard.mjs --source-only
+
+      # #344: the outbound half of the writer/starter pair, for the operator entry only. An
+      # operator keeps the direct dispatch of this workflow — `trigger=manual` for all three
+      # operations and `release-gate` for a deliberate re-gate — and that dispatch is admitted
+      # only when no `AnyWear-Infra` writer run is holding the served tuple. The automated
+      # dispatches are the writer's own children (`deploy-gate` for the deploy chain's `full`,
+      # `deploy-smoke`, and the daily `scheduled` reconcile), so the gate below skips the read
+      # entirely for them instead of letting a queued foreign writer refuse a starter that
+      # runs inside the writer's held run. The read is credential-free for AWS: it mints one
+      # read-only App token for `AnyWear-Infra` (`actions: read` only), declares no
+      # `environment` and requests no OIDC permission, so it belongs here, ahead of every
+      # credential job.
+      #
+      # #358: `release-qualify` is the retired spelling of `release-gate`. It stays in this
+      # gate until the dispatcher's rename merges, so an operator dispatch under the old value
+      # cannot skip the read and land a gate on a tuple a writer is changing.
+      - name: Generate Infra writer read token
+        id: infra-writer-token
+        if: inputs.trigger == 'manual' || inputs.trigger == 'release-gate' || inputs.trigger == 'release-qualify'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: AnyWear-Infra
+          permission-actions: read
+
+      # The admission reads the nonterminal Infra writer runs and refuses only when a
+      # successfully read list names a foreign run whose hold job (`qualify-hold`/`e2e-hold`
+      # for `mutate.yml`, `hold` for the scheduled entry) is nonterminal. An unreadable list
+      # warns and admits, so a failing writer cannot lock the operator out of diagnosing it.
+      - name: Admit this gate only when no Infra writer holds the tuple
+        if: inputs.trigger == 'manual' || inputs.trigger == 'release-gate' || inputs.trigger == 'release-qualify'
+        env:
+          GH_TOKEN: ${{ steps.infra-writer-token.outputs.token }}
+          DISPATCHED_BY: ${{ inputs.dispatched_by }}
+        run: node scripts/writer-admission.mjs --dispatched-by "$DISPATCHED_BY"
+
+      # The live identity, the supported-Client floor and the immutable Service release are
+      # verified here, before any job holds a credential. The check reads only the two
+      # public Beta endpoints and the GitHub API.
+      - name: Generate Service artifact read token
+        id: service-artifact-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: AnyWear-Service
+          permission-contents: read
+
+      - name: Verify the live deployed tuple, supported-Client floor and immutable Service release
+        id: live-identity
+        env:
+          SERVICE_ARTIFACT_READ_TOKEN: ${{ steps.service-artifact-token.outputs.token }}
+          GH_TOKEN: ${{ steps.service-artifact-token.outputs.token }}
+          OPERATION: ${{ steps.operation-scope.outputs.operation }}
+          EXPECTED_SERVICE_COMMIT: ${{ inputs.expected_service_commit }}
+          EXPECTED_CLIENT_COMMIT: ${{ inputs.expected_client_commit }}
+        shell: bash
+        run: |
+          args=(--operation "$OPERATION" --client-url "$E2E_CLIENT_URL" --service-url "$E2E_SERVICE_URL")
+          if [[ -n "$EXPECTED_SERVICE_COMMIT" ]]; then args+=(--expected-service-commit "$EXPECTED_SERVICE_COMMIT"); fi
+          if [[ -n "$EXPECTED_CLIENT_COMMIT" ]]; then args+=(--expected-client-commit "$EXPECTED_CLIENT_COMMIT"); fi
+          node scripts/service-release.mjs "${args[@]}"
+          if [[ "$OPERATION" == full || "$OPERATION" == smoke ]]; then
+            {
+              echo "### Live Beta tuple"
+              echo
+              echo "- Client: \`$(jq -r '.client.source_commit' .e2e-inputs/live-identity.json)\` (version $(jq -r '.client.client_version' .e2e-inputs/live-identity.json))"
+              echo "- Service: \`$(jq -r '.service.service_commit' .e2e-inputs/live-identity.json)\`"
+              echo "- Image: \`$(jq -r '.service.image_digest' .e2e-inputs/live-identity.json)\`"
+              echo "- Minimum Client: $(jq -r '.service.minimum_client_version' .e2e-inputs/live-identity.json)"
+              echo "- Service release: \`$(jq -r '.tag' .e2e-inputs/service-release.json)\` (target $(jq -r '.target_commit' .e2e-inputs/service-release.json), $(jq -r '.assets | length' .e2e-inputs/service-release.json) released assets)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "reviewed_service_commit=$(jq -r '.service.service_commit' .e2e-inputs/live-identity.json)"
+              echo "reviewed_service_image_digest=$(jq -r '.service.image_digest' .e2e-inputs/live-identity.json)"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify the reviewed cleanup source against the immutable Service release
+        # reconcile is outside the live-identity gate (#217), so it proves the deployed
+        # commit names its immutable release here, still credential-free.
+        if: steps.operation-scope.outputs.operation == 'reconcile'
+        env:
+          SERVICE_ARTIFACT_READ_TOKEN: ${{ steps.service-artifact-token.outputs.token }}
+          GH_TOKEN: ${{ steps.service-artifact-token.outputs.token }}
+        shell: bash
+        run: node scripts/cleanup-source.mjs verify --operation "$E2E_OPERATION" --service-url "$E2E_SERVICE_URL"
+
+  # #217: automatic leftover expiry. It runs before every gate suite and as its own
+  # dispatched operation, so a gate run starts from a reconciled environment and no
+  # leftover waits for an operator. It reads the run-bound lifecycle artifacts of the lookback
+  # and the CloudTrail `AdminCreateUser` history, attributes every identity to the run that
+  # created it (the credential session names it), replays the exact-reference Service cleanup,
+  # deletes each identity by its immutable username, reads absence back, and writes the
+  # `anywear_e2e_account_reconcile` v1 record. The job is bounded to 15 minutes and fails
+  # closed without deleting when a source is unavailable. The one migration dispatch over the
+  # 90-day artifact retention is bounded to 30 minutes and states the window it read.
+  reconcile:
+    name: Reconcile retained E2E identities and objects
+    needs: preflight
+    if: github.ref == 'refs/heads/main' && (needs.preflight.outputs.operation == 'reconcile' || needs.preflight.outputs.operation == 'full' || needs.preflight.outputs.operation == 'smoke')
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.operation == 'reconcile' && inputs.reconcile_lookback_days == '90' && 30 || 15 }}
+    environment: beta
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      E2E_STAGE: beta
+      E2E_OPERATION: ${{ inputs.operation }}
+      ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
+      # The reviewed lookback and the job's own deadline. An ordinary reconcile stops starting
+      # work at 720 seconds inside a 15-minute job; the one migration dispatch stops at 1500
+      # seconds inside a 30-minute job, and the remaining deadline is passed into every cleanup
+      # wait so no wait outlives the job and loses the record.
+      E2E_ACCOUNT_RECONCILE_LOOKBACK_DAYS: ${{ inputs.reconcile_lookback_days }}
+      E2E_ACCOUNT_RECONCILE_DEADLINE_SECONDS: ${{ inputs.reconcile_lookback_days == '90' && '1500' || '720' }}
+      E2E_ACCOUNT_RECONCILE_DIRECTORY: reconcile
+      E2E_ACCOUNT_RECONCILE_RECORD_PATH: reconcile/account-reconcile.json
+
+    steps:
+      - name: Checkout E2E sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install E2E dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The source gate ran in the credential-free preflight; this job only re-proves that
+      # it is the protected source before it holds a credential.
+      - name: Require protected execution
+        run: node scripts/execution-guard.mjs --source-only
+
+      - name: Configure Beta AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/beta-e2e-qualification-role
+          role-session-name: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify dedicated E2E principal
+        shell: bash
+        run: |
+          identity=$(aws sts get-caller-identity --output json)
+          account=$(jq -r '.Account' <<< "$identity")
+          principal=$(jq -r '.Arn' <<< "$identity")
+          [[ "$account" == 650880818323 ]]
+          [[ "$principal" == "arn:aws:sts::650880818323:assumed-role/beta-e2e-qualification-role/e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]
+          echo "E2E_AWS_ACCOUNT=$account" >> "$GITHUB_ENV"
+          echo "E2E_AWS_PRINCIPAL_ARN=$principal" >> "$GITHUB_ENV"
+
+      # The cleanup envelope must name the Service release the cleanup capability was
+      # deployed with, so the live tuple supplies the source/image pair. A gate run
+      # has already observed it; this job reads it once for its own envelope.
+      #
+      # #287: the cleanup capability version ARN is read from the deployment here, once for
+      # this job, and pinned in the job environment. The read is the same step that fixes the
+      # envelope's Service identity, and nothing re-resolves it later: the reconcile pass uses
+      # the pin, and the `gate` before its first deletion compares the pin with the publication
+      # read at that moment. The command substitution is the command, so a refused resolve fails
+      # this step before any identity is deleted.
+      - name: Load the Beta pool and the live cleanup identity
+        env:
+          E2E_EVIDENCE_PATH: reconcile/deployment-evidence.json
+          EXPECTED_SERVICE_COMMIT: ${{ needs.preflight.outputs.reviewed_service_commit }}
+          EXPECTED_SERVICE_IMAGE_DIGEST: ${{ needs.preflight.outputs.reviewed_service_image_digest }}
+        run: |
+          version_arn=$(node scripts/cleanup-capability.mjs resolve)
+          mkdir -p reconcile
+          pool_id=$(aws ssm get-parameter --name /anywear/beta/cognito_user_pool_id --query Parameter.Value --output text)
+          pnpm e2e:collect
+          cleanup_source=$(jq -r '.service.service_commit' reconcile/deployment-evidence.json)
+          cleanup_image=$(jq -r '.service.image_digest' reconcile/deployment-evidence.json)
+          if [[ -n "$EXPECTED_SERVICE_COMMIT" ]]; then
+            gate_args=(--operation "$E2E_OPERATION" --expected-service-commit "$EXPECTED_SERVICE_COMMIT")
+            if [[ -n "$EXPECTED_SERVICE_IMAGE_DIGEST" ]]; then gate_args+=(--expected-service-image-digest "$EXPECTED_SERVICE_IMAGE_DIGEST"); fi
+            E2E_CLEANUP_SERVICE_SOURCE_SHA="$cleanup_source" E2E_CLEANUP_SERVICE_IMAGE_DIGEST="$cleanup_image" \
+              node scripts/cleanup-source.mjs gate "${gate_args[@]}"
+          fi
+          {
+            echo "USER_POOL_ID=$pool_id"
+            echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$cleanup_source"
+            echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$cleanup_image"
+            echo "BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=$version_arn"
+          } >> "$GITHUB_ENV"
+
+      - name: Reconcile recent E2E leftover identities
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/execution-guard.mjs
+          node scripts/cleanup-capability.mjs gate
+          node scripts/reconcile-accounts.mjs
+
+      - name: Upload the reconcile record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-account-reconcile-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            reconcile/account-reconcile.json
+            reconcile/deployment-evidence.json
+            reconcile/service-cleanup-*.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+  # The release gate. It carries the deployed release-gating suite, and its own conclusion is
+  # the verdict: there is no record to build, validate or attach, and no other job reads it.
+  full:
+    name: Gate the live deployed tuple on Beta
+    needs: [preflight, reconcile]
+    if: github.ref == 'refs/heads/main' && needs.preflight.outputs.operation == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: beta
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      E2E_STAGE: beta
+      E2E_OPERATION: ${{ inputs.operation }}
+      E2E_EXTERNAL_SERVERS: true
+      ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
+      CLEANUP_MACHINE_AUTH_SECRET: ${{ secrets.CLEANUP_MACHINE_AUTH_SECRET }}
+      E2E_WORKERS: 2
+      E2E_WORKER_SLOT_OFFSET: ${{ inputs.worker_slot_offset }}
+      E2E_MAX_ACTIVE_ACCOUNTS: 2
+      # The `@regression` selection holds eight scenarios, but only seven lease a pool
+      # address: `auth-startup` 1, `vto` 3, `wardrobe` 2 and `worker-smoke` 1.
+      # `rejection-contract` leases none — it uses the bare Playwright `request` fixture.
+      # 14 = 7 + one retry round: the seven leases of the attempt plus the same seven for
+      # one retry. Run 44931518368 measured the boundary: six leases succeeded and
+      # `worker-smoke` was refused with `E2E new-account budget exhausted` at the old cap
+      # of 6, so the seventh lease is exactly where 6 runs out.
+      E2E_MAX_NEW_ACCOUNTS_PER_RUN: 14
+      # The run's own Playwright JSON report, kept with the gate diagnostics for a reader and
+      # for the failure screenshots beside it. Nothing derives a verdict from these bytes: the
+      # run's conclusion is the verdict, and the report is what a human opens to read it.
+      E2E_REPORT_PATH: test-results/beta-e2e-report.json
+
+    steps:
+      - name: Checkout E2E sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check E2E source
+        run: pnpm check
+
+      - name: Require protected execution
+        run: node scripts/execution-guard.mjs --source-only
+
+      - name: Generate Service artifact read token
+        id: service-artifact-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: AnyWear-Service
+          permission-contents: read
+
+      # #180: the credential-free gate is repeated here, in the job that runs the suite,
+      # before it assumes any AWS credential. It compares the live identity with the dispatch
+      # expectation, enforces the supported-Client floor and verifies the immutable Service
+      # release, writing the live and release identities a later step and the artifact list
+      # read. The preflight already ran the same check; this run is the one the green suite
+      # belongs to, and it fails before the suite starts.
+      - name: Verify the live deployed tuple and the immutable Service release
+        env:
+          SERVICE_ARTIFACT_READ_TOKEN: ${{ steps.service-artifact-token.outputs.token }}
+          GH_TOKEN: ${{ steps.service-artifact-token.outputs.token }}
+          EXPECTED_SERVICE_COMMIT: ${{ inputs.expected_service_commit }}
+          EXPECTED_CLIENT_COMMIT: ${{ inputs.expected_client_commit }}
+        shell: bash
+        run: |
+          args=(--operation full --client-url "$E2E_CLIENT_URL" --service-url "$E2E_SERVICE_URL")
+          if [[ -n "$EXPECTED_SERVICE_COMMIT" ]]; then args+=(--expected-service-commit "$EXPECTED_SERVICE_COMMIT"); fi
+          if [[ -n "$EXPECTED_CLIENT_COMMIT" ]]; then args+=(--expected-client-commit "$EXPECTED_CLIENT_COMMIT"); fi
+          node scripts/service-release.mjs "${args[@]}"
+
+      - name: Configure Beta AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/beta-e2e-qualification-role
+          role-session-name: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify dedicated E2E principal
+        shell: bash
+        run: |
+          identity=$(aws sts get-caller-identity --output json)
+          account=$(jq -r '.Account' <<< "$identity")
+          principal=$(jq -r '.Arn' <<< "$identity")
+          [[ "$account" == 650880818323 ]]
+          [[ "$principal" == "arn:aws:sts::650880818323:assumed-role/beta-e2e-qualification-role/e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]
+          echo "E2E_AWS_ACCOUNT=$account" >> "$GITHUB_ENV"
+          echo "E2E_AWS_PRINCIPAL_ARN=$principal" >> "$GITHUB_ENV"
+
+      - name: Require Beta admission eligibility
+        run: node scripts/beta-admission-eligibility.mjs
+
+      - name: Observe authenticated deployed tuple before suite
+        env:
+          E2E_EVIDENCE_PATH: deployment-evidence-before.json
+        run: pnpm e2e:collect
+
+      # #287: this step fixes the cleanup envelope's Service identity *and* pins the cleanup
+      # capability version ARN the deployment publishes. One resolve per job, here; the teardown
+      # uses the pin and never resolves it again. The command substitution is the command, so a
+      # refused resolve fails the step before the suite creates its first test account.
+      - name: Load Beta test identity configuration
+        env:
+          EXPECTED_SERVICE_COMMIT: ${{ needs.preflight.outputs.reviewed_service_commit }}
+          EXPECTED_SERVICE_IMAGE_DIGEST: ${{ needs.preflight.outputs.reviewed_service_image_digest }}
+        shell: bash
+        run: |
+          version_arn=$(node scripts/cleanup-capability.mjs resolve)
+          pool_id=$(aws ssm get-parameter --name /anywear/beta/cognito_user_pool_id --query Parameter.Value --output text)
+          client_id=$(aws ssm get-parameter --name /anywear/beta/cognito_client_id --query Parameter.Value --output text)
+          cleanup_source=$(jq -r '.service.service_commit' deployment-evidence-before.json)
+          cleanup_image=$(jq -r '.service.image_digest' deployment-evidence-before.json)
+          if [[ -n "$EXPECTED_SERVICE_COMMIT" ]]; then
+            gate_args=(--operation "$E2E_OPERATION" --expected-service-commit "$EXPECTED_SERVICE_COMMIT")
+            if [[ -n "$EXPECTED_SERVICE_IMAGE_DIGEST" ]]; then gate_args+=(--expected-service-image-digest "$EXPECTED_SERVICE_IMAGE_DIGEST"); fi
+            E2E_CLEANUP_SERVICE_SOURCE_SHA="$cleanup_source" E2E_CLEANUP_SERVICE_IMAGE_DIGEST="$cleanup_image" \
+              node scripts/cleanup-source.mjs gate "${gate_args[@]}"
+          fi
+          {
+            echo "USER_POOL_ID=$pool_id"
+            echo "VITE_COGNITO_USER_POOL_ID=$pool_id"
+            echo "VITE_COGNITO_CLIENT_ID=$client_id"
+            echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$cleanup_image"
+            echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$cleanup_source"
+            echo "BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=$version_arn"
+          } >> "$GITHUB_ENV"
+
+      - name: Set unique cleanup run scope
+        shell: bash
+        run: |
+          run_scope="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 8)"
+          echo "E2E_CLEANUP_RUN_SCOPE=$run_scope" >> "$GITHUB_ENV"
+
+      - name: Install Chromium
+        run: pnpm exec playwright install chromium --with-deps
+
+      # Captured immediately before the suite for every gate run: a redeployment cannot gate a
+      # tuple, so which workers were serving Beta at suite start belongs in every run's
+      # evidence. A capture that cannot be taken fails here rather than letting the run proceed
+      # without the ability to attribute its own outcome.
+      - name: Capture Beta worker identity before the suite
+        run: node scripts/e2e-environment.mjs capture --phase before
+
+      - name: Run the release-gating business regression suite
+        id: beta-suite
+        run: |
+          node scripts/execution-guard.mjs
+          node scripts/cleanup-capability.mjs gate
+          pnpm test
+
+      - name: Capture Beta worker identity after the suite
+        # Runs even when the suite failed: a run that was replaced underneath must
+        # still be able to say so. Placed before the worker cleanup so the window it
+        # brackets stays the suite itself.
+        if: ${{ always() }}
+        run: node scripts/e2e-environment.mjs capture --phase after
+
+      - name: Clean up exact Beta worker identities
+        if: ${{ always() && steps.beta-suite.outcome != 'skipped' }}
+        run: |
+          node scripts/execution-guard.mjs
+          pnpm accounts:cleanup-workers
+
+      - name: Attribute the suite outcome to the product or the Beta environment
+        # The verdict is evidence, and the step below reports whatever it concluded: it
+        # attributes the run's outcome to the product or to the environment in its own
+        # artifact, and never turns a failed run green. A cancelled or timed-out suite is
+        # `incomplete`, which asserts no product failure because none was established.
+        id: environment
+        if: ${{ always() }}
+        env:
+          SUITE_OUTCOME: ${{ steps.beta-suite.outcome == 'success' && 'success' || (steps.beta-suite.outcome == 'failure' && 'failure' || 'incomplete') }}
+        run: node scripts/e2e-environment.mjs verdict --suite-outcome "$SUITE_OUTCOME"
+
+      - name: Preserve Beta suite failure
+        if: ${{ always() && steps.beta-suite.outcome == 'failure' }}
+        env:
+          ENVIRONMENT_VERDICT: ${{ steps.environment.outputs.verdict }}
+          ENVIRONMENT_REASON: ${{ steps.environment.outputs.reason }}
+        run: |
+          if [[ "$ENVIRONMENT_VERDICT" == "environment-changed" ]]; then
+            echo "::error title=Environment changed during the suite::${ENVIRONMENT_REASON}"
+            {
+              echo "### Environment changed during the Beta suite"
+              echo
+              echo "${ENVIRONMENT_REASON}"
+              echo
+              echo "No product failure is asserted for this run. The gate cannot be read from"
+              echo "a window the platform was redeployed under; re-run it."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 1
+
+      # The reviewed Client floor the gate measures against. The deployed Service enforces it
+      # on every non-exempt request, and the rejection-contract scenario inside the
+      # release-gating suite proves it: below-floor, headerless and malformed requests are
+      # refused with CLIENT_VERSION_UNSUPPORTED, a request at the floor is admitted, and
+      # `/health` stays exempt. `minimum-supported-client.json` states that reviewed floor
+      # version only; the oldest-Client build that used to be checked out from a `sha` is
+      # deleted with its leg. This is the workflow's only literal mention of the manifest, so
+      # the floor the run is about to gate against is stated on the run itself.
+      - name: Read the minimum supported Client floor
+        shell: bash
+        run: |
+          minimum_supported_client_version="$(jq -r '.version // empty' minimum-supported-client.json)"
+          if [[ ! "$minimum_supported_client_version" =~ ^(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::minimum-supported-client.json version must be a non-negative integer"
+            exit 1
+          fi
+          echo "Committed floor: $minimum_supported_client_version"
+
+      - name: Confirm deployed identities remained stable
+        env:
+          E2E_BASELINE_PATH: deployment-evidence-before.json
+        run: pnpm e2e:collect
+
+      - name: Upload gate diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-e2e-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .e2e-inputs/live-identity.json
+            .e2e-inputs/service-release.json
+            .e2e-inputs/beta-environment-before.json
+            .e2e-inputs/beta-environment-after.json
+            deployment-evidence-before.json
+            deployment-evidence.json
+            test-results/beta-e2e-report.json
+            test-results/beta-environment-verdict.json
+            test-results/**/error-context.md
+          retention-days: 90
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+      - name: Upload Playwright diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-account-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/account-budget.json
+            test-results/service-cleanup-operation.json
+            test-results/service-cleanup-run.json
+          if-no-files-found: ignore
+
+      - name: Upload failed-test screenshots and traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-failure-screenshots-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/**/test-failed-*.png
+            test-results/**/trace.zip
+            test-results/**/worker-profile-binding.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # The deployed smoke diagnostic of the former E2E Integration workflow. It writes no gate
+  # verdict and no ledger: it uploads its own tested revisions for a human reader.
+  smoke:
+    name: Deployed Beta smoke diagnostic
+    needs: [preflight, reconcile]
+    if: github.ref == 'refs/heads/main' && needs.preflight.outputs.operation == 'smoke'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: beta
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      E2E_STAGE: beta
+      E2E_OPERATION: ${{ inputs.operation }}
+      E2E_EXTERNAL_SERVERS: true
+      ENABLE_BETA_MUTATION: ${{ vars.ENABLE_BETA_MUTATION }}
+      CLEANUP_MACHINE_AUTH_SECRET: ${{ secrets.CLEANUP_MACHINE_AUTH_SECRET }}
+      E2E_WORKERS: 2
+      E2E_WORKER_SLOT_OFFSET: ${{ inputs.worker_slot_offset }}
+      E2E_MAX_ACTIVE_ACCOUNTS: 2
+      # The `@smoke` selection is `auth-startup` and `worker-smoke`: two account-leasing
+      # scenarios per attempt, and nothing else in it consumes an account. 6 already covers
+      # 2 x 3 attempts (initial + two CI retries), which is more than the 2 + one retry
+      # round the `full` arithmetic would justify here, so there is no named need to raise
+      # it and the value stays.
+      E2E_MAX_NEW_ACCOUNTS_PER_RUN: 6
+
+    steps:
+      - name: Checkout E2E sources
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11.18.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install E2E dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check E2E source
+        run: pnpm check
+
+      - name: Require protected execution
+        run: node scripts/execution-guard.mjs --source-only
+
+      - name: Verify OIDC identity
+        shell: bash
+        run: |
+          response=$(curl --fail --silent --show-error \
+            --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+          token=$(jq -r '.value' <<< "$response")
+          claims=$(node -e \
+            "const payload = process.argv[1].split('.')[1]; process.stdout.write(Buffer.from(payload, 'base64url').toString())" \
+            "$token")
+          actual_subject=$(jq -r '.sub' <<< "$claims")
+          expected_subject="repo:anywear-ai@352675702/AnyWear-E2E@1317091305:environment:beta"
+          jq '{iss, aud, sub}' <<< "$claims"
+          test "$actual_subject" = "$expected_subject"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/beta-e2e-qualification-role
+          role-session-name: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify dedicated E2E principal
+        shell: bash
+        run: |
+          identity=$(aws sts get-caller-identity --output json)
+          account=$(jq -r '.Account' <<< "$identity")
+          principal=$(jq -r '.Arn' <<< "$identity")
+          [[ "$account" == 650880818323 ]]
+          [[ "$principal" == "arn:aws:sts::650880818323:assumed-role/beta-e2e-qualification-role/e2e-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" ]]
+          echo "E2E_AWS_ACCOUNT=$account" >> "$GITHUB_ENV"
+          echo "E2E_AWS_PRINCIPAL_ARN=$principal" >> "$GITHUB_ENV"
+
+      # Beta registration admits only the tester allowlist (issue #213), so the smoke
+      # operation leases the same stable worker pool the gate does. Prove every pool address
+      # it can lease is listed before the first account exists.
+      - name: Require Beta admission eligibility
+        run: node scripts/beta-admission-eligibility.mjs
+
+      - name: Observe authenticated deployed tuple before smoke
+        env:
+          E2E_EVIDENCE_PATH: deployment-evidence-before.json
+        run: pnpm e2e:collect
+
+      # The live tuple this smoke run actually exercised. The retired pin printout named the
+      # reviewed Client and Service commits; the smoke run no longer checks those revisions
+      # out, so it states its own source and the live identity it observed instead (#180).
+      - name: Record tested revisions
+        shell: bash
+        run: |
+          {
+            echo "E2E $(git rev-parse HEAD)"
+            echo "Client $(jq -r '.client.source_commit' deployment-evidence-before.json)"
+            echo "Service $(jq -r '.service.service_commit' deployment-evidence-before.json)"
+            echo "Image $(jq -r '.service.image_digest' deployment-evidence-before.json)"
+            echo "Minimum Client $(jq -r '.service.minimum_client_version' .e2e-inputs/live-identity.json)"
+          } | tee tested-revisions.txt
+
+      # #287: this step fixes the cleanup envelope's Service identity *and* pins the cleanup
+      # capability version ARN the deployment publishes. One resolve per job, here; the teardown
+      # uses the pin and never resolves it again. The command substitution is the command, so a
+      # refused resolve fails the step before the smoke suite creates its first test account.
+      - name: Load Beta test identity configuration
+        env:
+          EXPECTED_SERVICE_COMMIT: ${{ needs.preflight.outputs.reviewed_service_commit }}
+          EXPECTED_SERVICE_IMAGE_DIGEST: ${{ needs.preflight.outputs.reviewed_service_image_digest }}
+        shell: bash
+        run: |
+          version_arn=$(node scripts/cleanup-capability.mjs resolve)
+          pool_id=$(aws ssm get-parameter --name /anywear/beta/cognito_user_pool_id --query Parameter.Value --output text)
+          client_id=$(aws ssm get-parameter --name /anywear/beta/cognito_client_id --query Parameter.Value --output text)
+          cleanup_source=$(jq -r '.service.service_commit' deployment-evidence-before.json)
+          cleanup_image=$(jq -r '.service.image_digest' deployment-evidence-before.json)
+          if [[ -n "$EXPECTED_SERVICE_COMMIT" ]]; then
+            gate_args=(--operation "$E2E_OPERATION" --expected-service-commit "$EXPECTED_SERVICE_COMMIT")
+            if [[ -n "$EXPECTED_SERVICE_IMAGE_DIGEST" ]]; then gate_args+=(--expected-service-image-digest "$EXPECTED_SERVICE_IMAGE_DIGEST"); fi
+            E2E_CLEANUP_SERVICE_SOURCE_SHA="$cleanup_source" E2E_CLEANUP_SERVICE_IMAGE_DIGEST="$cleanup_image" \
+              node scripts/cleanup-source.mjs gate "${gate_args[@]}"
+          fi
+          {
+            echo "USER_POOL_ID=$pool_id"
+            echo "VITE_COGNITO_USER_POOL_ID=$pool_id"
+            echo "VITE_COGNITO_CLIENT_ID=$client_id"
+            echo "E2E_CLEANUP_SERVICE_IMAGE_DIGEST=$cleanup_image"
+            echo "E2E_CLEANUP_SERVICE_SOURCE_SHA=$cleanup_source"
+            echo "BETA_CLEANUP_STATE_MACHINE_VERSION_ARN=$version_arn"
+          } >> "$GITHUB_ENV"
+
+      - name: Set unique cleanup run scope
+        shell: bash
+        run: |
+          run_scope="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(openssl rand -hex 8)"
+          echo "E2E_CLEANUP_RUN_SCOPE=$run_scope" >> "$GITHUB_ENV"
+
+      - name: Install Chromium
+        run: pnpm exec playwright install chromium --with-deps
+
+      - name: Run deployed Beta smoke tests
+        id: beta-smoke-suite
+        run: |
+          node scripts/execution-guard.mjs
+          node scripts/cleanup-capability.mjs gate
+          pnpm test:smoke
+
+      - name: Clean up exact Beta worker identities
+        if: ${{ always() && steps.beta-smoke-suite.outcome != 'skipped' }}
+        run: |
+          node scripts/execution-guard.mjs
+          pnpm accounts:cleanup-workers
+
+      - name: Preserve Beta smoke failure
+        if: ${{ always() && steps.beta-smoke-suite.outcome == 'failure' }}
+        run: exit 1
+
+      - name: Confirm authenticated deployed tuple remained stable
+        env:
+          E2E_BASELINE_PATH: deployment-evidence-before.json
+        run: pnpm e2e:collect
+
+      - name: Upload tested revisions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tested-revisions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            tested-revisions.txt
+            deployment-evidence.json
+
+      - name: Upload Playwright diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-smoke-account-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/account-budget.json
+            test-results/service-cleanup-operation.json
+            test-results/service-cleanup-run.json
+          if-no-files-found: ignore
+
+      - name: Upload failed-test screenshots and traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-failure-screenshots-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/**/test-failed-*.png
+            test-results/**/trace.zip
+            test-results/**/worker-profile-binding.json
+          retention-days: 7
+          if-no-files-found: ignore

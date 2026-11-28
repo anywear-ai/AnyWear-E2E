@@ -35,18 +35,17 @@ dotenv.config({ path: path.join(repositoryRoot, '.env') });
 const workers = configuredWorkers();
 validateAccountBudget(workers);
 
-// The qualification record states which selection issued it and which scenarios ran, and
-// that statement is derived from this run's own Playwright JSON report. The report is
-// written only where the qualification workflow declares a path for it, and never by
-// `playwright test --list`: discovery calls no test, so it must not produce — or overwrite —
-// the report a record is issued from. `pnpm test` keeps its exact command line, so the
-// report path travels through the job environment rather than a reporter flag.
-const qualificationReport = process.env.E2E_QUALIFICATION_REPORT;
+// #358: the gate run keeps its own Playwright JSON report for a reader. The report is written
+// only where the gate workflow declares a path for it, and never by `playwright test --list`:
+// discovery calls no test, so it must not produce — or overwrite — the report a run is read
+// from. `pnpm test` keeps its exact command line, so the report path travels through the job
+// environment rather than a reporter flag.
+const gateReportPath = process.env.E2E_REPORT_PATH;
 const listOnly = process.argv.includes('--list');
 const reporter: ReporterDescription[] = process.env.CI
   ? [['github'], ['html', { open: 'never' }]]
   : [['list'], ['html', { open: 'never' }]];
-if (qualificationReport && !listOnly) reporter.push(['json', { outputFile: qualificationReport }]);
+if (gateReportPath && !listOnly) reporter.push(['json', { outputFile: gateReportPath }]);
 
 export default defineConfig({
   testDir: './tests',

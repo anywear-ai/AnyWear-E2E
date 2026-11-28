@@ -14,7 +14,8 @@ const TESTER_ALLOWLIST_PARAMETER = '/anywear/beta/tester_allowlist';
 // #266: owner-relative, so the same protected entry is recognised on either side of the
 // repository transfer. The repository half of the workflow ref is derived from the run's
 // own GITHUB_REPOSITORY when it is compared below.
-const qualificationWorkflow = (repository) => `${repository}/.github/workflows/beta-qualification.yml@refs/heads/main`;
+// #358: the entry is `beta-e2e.yml`.
+const qualificationWorkflow = (repository) => `${repository}/.github/workflows/beta-e2e.yml@refs/heads/main`;
 // #163: operation `full` runs exactly two workers, and that width is part of the
 // operation's shape. The pre-flight checks the same width the suite will use.
 const QUALIFICATION_WORKERS = 2;

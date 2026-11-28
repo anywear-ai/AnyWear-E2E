@@ -27,7 +27,7 @@ function environment(overrides = {}) {
     E2E_OPERATION: 'reconcile',
     GITHUB_SHA: SHA,
     GITHUB_WORKFLOW_SHA: SHA,
-    GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main',
+    GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/beta-e2e.yml@refs/heads/main',
     GITHUB_RUN_ID: RUN_ID,
     GITHUB_RUN_ATTEMPT: ATTEMPT,
     AWS_ACCOUNT_ID: '650880818323',
@@ -92,7 +92,7 @@ test('the guard accepts the protected E2E repository under either owner across t
     GITHUB_REPOSITORY: 'git-malu/AnyWear-E2E',
     GITHUB_REPOSITORY_OWNER: 'git-malu',
     GITHUB_REPOSITORY_OWNER_ID: '11473072',
-    GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main',
+    GITHUB_WORKFLOW_REF: 'git-malu/AnyWear-E2E/.github/workflows/beta-e2e.yml@refs/heads/main',
   }), sourceSha), true);
 });
 
@@ -105,7 +105,7 @@ test('the guard still refuses a foreign repository id or a workflow ref for anot
   // The workflow ref must name the repository the run reports and the entry the operation
   // maps to: another repository and another workflow file are both refused.
   assert.throws(() => assertE2EExecution(environment({
-    GITHUB_WORKFLOW_REF: 'other/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main',
+    GITHUB_WORKFLOW_REF: 'other/AnyWear-E2E/.github/workflows/beta-e2e.yml@refs/heads/main',
   }), sourceSha), /protected workflow\/source/);
   assert.throws(() => assertE2EExecution(environment({
     GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/integration.yml@refs/heads/main',

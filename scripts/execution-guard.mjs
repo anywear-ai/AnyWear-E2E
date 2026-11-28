@@ -18,10 +18,12 @@ const sourceRoot = fileURLToPath(new URL('..', import.meta.url));
 // exact protected workflow ref this guard requires. The manual `recover` operation was
 // removed with the same change.
 export const E2E_OPERATIONS = Object.freeze(['full', 'smoke', 'reconcile']);
+// #358: the entry is `beta-e2e.yml`. The map is what makes a renamed workflow file a
+// reviewable change: the guard refuses a run whose `GITHUB_WORKFLOW_REF` names any other file.
 const operationEntries = Object.freeze({
-  full: 'beta-qualification',
-  smoke: 'beta-qualification',
-  reconcile: 'beta-qualification',
+  full: 'beta-e2e',
+  smoke: 'beta-e2e',
+  reconcile: 'beta-e2e',
 });
 
 /**

@@ -16,15 +16,13 @@
     "test:smoke": "playwright test --grep @smoke",
     "test:regression": "playwright test --grep @regression",
     "test:full-stack": "playwright test --grep @full-stack",
-    "test:core": "node --test tests/scenario-declarations.test.mjs scripts/entry-census.test.mjs scripts/record-reader-census.test.mjs scripts/workflow-env-scope.test.mjs scripts/account-budget.test.mjs scripts/account-provisioning.test.mjs scripts/cognito-cleanup.test.mjs scripts/qualification-record.test.mjs scripts/test-selection.test.mjs scripts/wardrobe-lifecycle.test.mjs scripts/worker-cleanup.test.mjs scripts/reconcile-accounts.test.mjs scripts/execution-guard.test.mjs scripts/service-cleanup-operation.test.mjs scripts/cleanup-capability.test.mjs scripts/cleanup-operation.test.mjs scripts/infra-qualification.test.mjs scripts/service-release.test.mjs scripts/cleanup-source.test.mjs scripts/beta-admission-eligibility.test.mjs scripts/auth-startup-attribution.test.mjs scripts/service-json-response.test.mjs scripts/qualification-environment.test.mjs scripts/lambda-configuration.test.mjs scripts/platform-entrypoints.test.mjs scripts/writer-admission.test.mjs",
+    "test:core": "node --test tests/scenario-declarations.test.mjs scripts/entry-census.test.mjs scripts/record-reader-census.test.mjs scripts/workflow-env-scope.test.mjs scripts/account-budget.test.mjs scripts/account-provisioning.test.mjs scripts/cognito-cleanup.test.mjs scripts/deployment-evidence.test.mjs scripts/test-selection.test.mjs scripts/wardrobe-lifecycle.test.mjs scripts/worker-cleanup.test.mjs scripts/reconcile-accounts.test.mjs scripts/execution-guard.test.mjs scripts/service-cleanup-operation.test.mjs scripts/cleanup-capability.test.mjs scripts/cleanup-operation.test.mjs scripts/service-release.test.mjs scripts/cleanup-source.test.mjs scripts/beta-admission-eligibility.test.mjs scripts/auth-startup-attribution.test.mjs scripts/service-json-response.test.mjs scripts/e2e-environment.test.mjs scripts/platform-entrypoints.test.mjs scripts/writer-admission.test.mjs",
     "test:tool-regressions": "node --test scripts/sse-replica-attribution.test.mjs",
     "test:deferred-sqs": "node --test scripts/beta-sqs-boundary-protocol.test.mjs scripts/beta-sqs-boundary-consumer.test.mjs",
     "accounts:cleanup-workers": "node scripts/cleanup-worker-accounts.mjs",
     "accounts:reconcile": "node scripts/reconcile-accounts.mjs",
     "test:list": "playwright test --list",
-    "qualification:collect": "node scripts/collect-deployment-evidence.mjs",
-    "qualification:generate": "node scripts/create-qualification-record.mjs",
-    "qualification:verify": "node scripts/verify-qualification-record.mjs",
+    "e2e:collect": "node scripts/collect-deployment-evidence.mjs",
     "report": "playwright show-report"
   },
   "devDependencies": {

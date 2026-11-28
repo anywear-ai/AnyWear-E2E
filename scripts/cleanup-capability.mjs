@@ -79,9 +79,10 @@ export class CleanupCapabilityRefusal extends Error {
 const MISSING_STACK = /Stack with id (\S+) does not exist/;
 
 /**
- * The live seam, in the shape `scripts/infra-observation.mjs` established: `aws` is the CLI this
- * job already holds a credential for, every read is a bounded subprocess, and `execute` is
- * injectable so the selection and gate logic is unit-tested without AWS.
+ * The live seam: `aws` is the CLI this job already holds a credential for, every read is a
+ * bounded subprocess, and `execute` is injectable so the selection and gate logic is unit-tested
+ * without AWS. (AnyWear #358 removed the platform observation that established this shape; the
+ * shape stays because it is what keeps this reader off the unit-test path.)
  */
 export function liveCapabilityIo({ execute = execFileSync, environment = process.env } = {}) {
   return {

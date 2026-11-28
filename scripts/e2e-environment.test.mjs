@@ -1,13 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { ENVIRONMENT_VERDICT_PATH, assertQualificationEnvironment, compareWorkerIdentity, environmentVerdict,
-  qualificationRefusalMessage, readOptionalEnvironmentJson, unavailableWorkerIdentityComparison,
-  validateWorkerIdentity, workerIdentitySnapshot } from './qualification-environment.mjs';
+import { compareWorkerIdentity, environmentVerdict, readOptionalEnvironmentJson,
+  unavailableWorkerIdentityComparison, validateWorkerIdentity, workerIdentitySnapshot } from './e2e-environment.mjs';
 
 const ACCOUNT = '650880818323';
 const WORKER_DEFINITION = `arn:aws:ecs:ap-east-1:${ACCOUNT}:task-definition/beta-anywear-worker:64`;
@@ -168,7 +165,7 @@ test('reads a removal as a replacement and reports the counts its reason names',
 
 test('names a changed worker task definition and never calls it a replacement', () => {
   // The same task ARN set under a new task definition: a redeployment the ARN set
-  // cannot show, and the case the qualification gate must block.
+  // cannot show, and the reason the verdict reports `environment-changed`.
   const byteIdentical = suiteWindow({ afterDefinition: NEXT_WORKER_DEFINITION,
     afterTasks: [workerTask('a', NEXT_WORKER_DEFINITION)] });
   const redefined = compareWorkerIdentity(byteIdentical.before, byteIdentical.after);
@@ -196,133 +193,6 @@ test('names a changed worker task definition and never calls it a replacement', 
   assert.deepEqual(shrunk.removed_task_arns, [taskArn('b'), taskArn('c')]);
   assert.deepEqual(shrunk.added_task_arns, []);
   assert.doesNotMatch(shrunk.reason, /replaced/);
-});
-
-test('refuses a qualification whose passing suite spanned two worker task definitions', () => {
-  const window = suiteWindow({ afterDefinition: NEXT_WORKER_DEFINITION,
-    afterTasks: [workerTask('a', NEXT_WORKER_DEFINITION)] });
-  const record = environmentVerdict({ comparison: compareWorkerIdentity(window.before, window.after),
-    suiteOutcome: 'success' });
-  assert.equal(record.verdict, 'environment-changed');
-  let refusal;
-  try { assertQualificationEnvironment({ record, problem: null }); } catch (error) { refusal = error; }
-  assert.ok(refusal, 'a passing suite across two worker task definitions must not qualify');
-  assert.equal(refusal.message, 'A passing suite measured across two worker task definitions cannot issue a '
-    + `qualification record: ${record.reason}. Worker tasks added: 0; removed: 0. `
-    + 'Re-run the qualification on one stable worker task definition.');
-  assert.equal(qualificationRefusalMessage(record), refusal.message);
-  assert.doesNotMatch(refusal.message, /replaced/);
-  assert.match(refusal.message, /Worker tasks added: 0; removed: 0/);
-  assert.doesNotMatch(refusal.message, /[\r\n]/);
-});
-
-test('records an ARN rotation and a non-passing definition change but still qualifies them', () => {
-  const rotated = suiteWindow({ afterTasks: [workerTask('a'), workerTask('b')] });
-  const rotation = environmentVerdict({ comparison: compareWorkerIdentity(rotated.before, rotated.after),
-    suiteOutcome: 'success' });
-  assert.equal(rotation.verdict, 'environment-changed');
-  assert.equal(rotation.comparison.task_definition_changed, false);
-  assert.doesNotThrow(() => assertQualificationEnvironment({ record: rotation, problem: null }));
-
-  // A definition change under a suite that already failed or never completed blocks
-  // nothing: no passing record was possible there either way.
-  const redefined = suiteWindow({ afterDefinition: NEXT_WORKER_DEFINITION,
-    afterTasks: [workerTask('a', NEXT_WORKER_DEFINITION)] });
-  const comparison = compareWorkerIdentity(redefined.before, redefined.after);
-  assert.equal(comparison.task_definition_changed, true);
-  for (const suiteOutcome of ['failure', 'incomplete']) {
-    assert.doesNotThrow(() => assertQualificationEnvironment({
-      record: environmentVerdict({ comparison, suiteOutcome }), problem: null,
-    }));
-  }
-
-  // A structurally valid verdict whose comparison is unavailable establishes no task
-  // definition change, so it is recorded rather than blocked.
-  const unavailable = environmentVerdict({
-    comparison: compareWorkerIdentity(null, null, { problem: 'Both captures are missing' }), suiteOutcome: 'success',
-  });
-  assert.equal(unavailable.verdict, 'unavailable');
-  assert.doesNotThrow(() => assertQualificationEnvironment({ record: unavailable, problem: null }));
-});
-
-test('refuses a qualification when the environment verdict cannot be consulted', () => {
-  const valid = environmentVerdict({
-    comparison: compareWorkerIdentity(null, null, { problem: 'Both captures are missing' }), suiteOutcome: 'success',
-  });
-  const unknownField = structuredClone(valid); unknownField.unexpected = true;
-  const missingField = structuredClone(valid); delete missingField.comparison.removed_task_arns;
-  const wrongType = structuredClone(valid); wrongType.comparison.task_definition_changed = 'no';
-  const unknownOutcome = structuredClone(valid); unknownOutcome.suite_outcome = 'cancelled';
-  const cases = [
-    ['missing', { record: null, problem: `${ENVIRONMENT_VERDICT_PATH} is missing` }],
-    ['unreadable', { record: null, problem: `${ENVIRONMENT_VERDICT_PATH} is not valid JSON` }],
-    ['absent', { record: null, problem: null }],
-    ['not an object', { record: [1], problem: null }],
-    ['truncated', { record: { record_type: 'beta-environment-verdict' }, problem: null }],
-    ['unknown field', { record: unknownField, problem: null }],
-    ['missing comparison field', { record: missingField, problem: null }],
-    ['wrong comparison type', { record: wrongType, problem: null }],
-    ['unknown suite outcome', { record: unknownOutcome, problem: null }],
-    ['not provided', undefined],
-  ];
-  for (const [name, environment] of cases) {
-    let refusal;
-    try { assertQualificationEnvironment(environment); } catch (error) { refusal = error; }
-    assert.ok(refusal, `${name} must refuse`);
-    assert.match(refusal.message, /could not be established/);
-    assert.match(refusal.message, /no qualification record is issued/);
-    assert.ok(refusal.message.includes(ENVIRONMENT_VERDICT_PATH), `${name} must name the expected verdict path`);
-  }
-  // The message names the path the caller actually read.
-  let renamed;
-  try { assertQualificationEnvironment({ record: null, problem: 'elsewhere.json is missing' }, { source: 'elsewhere.json' }); }
-  catch (error) { renamed = error; }
-  assert.match(renamed.message, /The Beta environment verdict at elsewhere\.json could not be established/);
-});
-
-test('the qualification-gate command fails the run for a definition change and passes the rotation', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'anywear-env-gate-'));
-  const repository = fileURLToPath(new URL('..', import.meta.url));
-  const summary = join(directory, 'step-summary.md');
-  let written = 0;
-  const gate = async (record) => {
-    const verdictPath = join(directory, `verdict-${written += 1}.json`);
-    await writeFile(verdictPath, `${JSON.stringify(record, null, 2)}\n`);
-    const result = spawnSync(process.execPath, ['scripts/qualification-environment.mjs', 'qualification-gate',
-      '--output', verdictPath], { cwd: repository, encoding: 'utf8',
-      env: { ...process.env, GITHUB_STEP_SUMMARY: summary } });
-    assert.equal(result.error, undefined);
-    return result;
-  };
-  try {
-    const redefined = suiteWindow({ afterDefinition: NEXT_WORKER_DEFINITION,
-      afterTasks: [workerTask('a', NEXT_WORKER_DEFINITION)] });
-    const changed = environmentVerdict({ comparison: compareWorkerIdentity(redefined.before, redefined.after),
-      suiteOutcome: 'success' });
-    const refused = await gate(changed);
-    assert.equal(refused.status, 1);
-    assert.ok(refused.stderr.includes('::error title=Worker task definition changed during the suite::'
-      + qualificationRefusalMessage(changed)));
-    assert.match(await readFile(summary, 'utf8'), /^### Qualification refused across two worker task definitions$/m);
-
-    const rotated = suiteWindow({ afterTasks: [workerTask('a'), workerTask('b')] });
-    const rotation = environmentVerdict({ comparison: compareWorkerIdentity(rotated.before, rotated.after),
-      suiteOutcome: 'success' });
-    assert.equal(rotation.verdict, 'environment-changed');
-    const qualified = await gate(rotation);
-    assert.equal(qualified.status, 0);
-    assert.doesNotMatch(`${qualified.stdout}${qualified.stderr}`, /cannot issue a qualification record/);
-
-    const unavailable = environmentVerdict({
-      comparison: compareWorkerIdentity(null, null, { problem: 'Both captures are missing' }), suiteOutcome: 'success',
-    });
-    assert.equal(unavailable.verdict, 'unavailable');
-    const recorded = await gate(unavailable);
-    assert.equal(recorded.status, 0);
-    assert.doesNotMatch(recorded.stderr, /::error/);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
 });
 
 test('records an unusable identity pair as unavailable without inventing a change', () => {

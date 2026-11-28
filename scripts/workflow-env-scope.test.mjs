@@ -121,11 +121,11 @@ function workflowJobs(source) {
   });
 }
 
-const qualify = read('beta-qualification.yml');
+const qualify = read('beta-e2e.yml');
 const qualifyJobs = workflowJobs(qualify);
 const job = (name) => {
   const found = qualifyJobs.find((candidate) => candidate.name === name);
-  assert.ok(found, `beta-qualification.yml must declare the ${name} job`);
+  assert.ok(found, `beta-e2e.yml must declare the ${name} job`);
   return found;
 };
 const environmentReference = (name) => new RegExp(`\\$\\{\\{\\s*(?:vars|secrets)\\.${name}\\s*\\}\\}`);
@@ -337,8 +337,8 @@ test('every operation gate uses the preflight-validated operation output', () =>
       `${operation} must not gate its job on the raw dispatch input`);
   }
 
-  // #217: the reconcile job serves its own operation and runs before every qualification
-  // suite, so its gate names all three operations and still reads only the validated output.
+  // #217: the reconcile job serves its own operation and runs before every gate suite, so its
+  // gate names all three operations and still reads only the validated output.
   const reconcile = job('reconcile');
   assert.match(reconcile.needsLine, /preflight/, 'reconcile must need preflight');
   for (const operation of ['reconcile', 'full', 'smoke']) {
@@ -347,11 +347,8 @@ test('every operation gate uses the preflight-validated operation output', () =>
   }
   assert.doesNotMatch(reconcile.ifLine, /inputs\.operation/, 'reconcile must not gate its job on the raw dispatch input');
 
-  // `record` gates on the same validated output, so it must also need the job that
-  // produces it: `needs: full` alone would leave needs.preflight.outputs unresolved.
-  const record = job('record');
-  assert.match(record.ifLine, /needs\.preflight\.outputs\.operation == 'full'/, 'record must gate on the validated operation');
-  assert.doesNotMatch(record.ifLine, /inputs\.operation/, 'record must not gate its job on the raw dispatch input');
-  assert.match(record.needsLine, /preflight/, 'record must need preflight for its output to resolve');
-  assert.match(record.needsLine, /full/, 'record must still need full');
+  // #358: there is no `record` job. The gate's verdict is the run's own conclusion, so no job
+  // may exist to validate or attach a ledger, and no job may gate on one.
+  assert.equal(qualifyJobs.some((candidate) => candidate.name === 'record'), false,
+    'the workflow must declare no record job: the qualification ledger is removed');
 });

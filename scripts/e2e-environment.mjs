@@ -6,22 +6,28 @@ import { pathToFileURL } from 'node:url';
 import { assertE2EExecution } from './execution-guard.mjs';
 import { canonicalJson, byteHash, exactKeys, requireHash } from './evidence-contract.mjs';
 
-// The environment a qualification suite is embedded in: the identity of the workers serving
-// Beta at suite start and suite end, the verdict that brackets the run, and the gate that
-// refuses a qualification measured across two worker task definitions.
+// The environment a gate suite is embedded in: the identity of the workers serving Beta at
+// suite start and suite end, and the verdict that attributes a red suite to the product or to
+// the environment.
 //
 // A suite that runs across a deployment rotation can have its in-flight work killed
 // underneath it. When that happens no terminal state is written for the case, the harness
 // waits out its budget, and the run reports the platform's own recovery as a product
-// failure. The evidence for that is issue #147 and qualification run 38864061777: a worker
+// failure. The evidence for that is issue #147 and gate run 38864061777: a worker
 // rotation stopped the task holding an S1 VTO case, its provider call was killed by SIGTERM
 // after 40.7 s, nothing was recorded for it, the case stayed in `Processing`, and the queue
 // redelivered the work exactly at its 900 s visibility floor - after the 600 s wait had
 // expired.
 //
-// The AWS reader is deliberately outside the Playwright spec: the qualification workflow
-// holds the scoped AWS credentials and the spec holds none, so the spec records what the
-// run observed and the workflow records what the platform was.
+// #358: the module keeps only `capture` and `verdict`. Its blocking half - refusing a record
+// for a passing suite measured across two worker task definitions - existed to seal the
+// qualification ledger, and the ledger is removed. That window is now closed by the retained
+// mutex (a deployment holds the tuple while its gate runs) and by the gate's own live
+// identity re-read, which makes the run red when the deployment changed under it.
+//
+// The AWS reader is deliberately outside the Playwright spec: the gate workflow holds the
+// scoped AWS credentials and the spec holds none, so the spec records what the run observed
+// and the workflow records what the platform was.
 
 export const BETA_ACCOUNT_ID = '650880818323';
 export const BETA_REGION = 'ap-east-1';
@@ -32,8 +38,8 @@ export const ENVIRONMENT_VERDICT_RECORD_TYPE = 'beta-environment-verdict';
 export const ENVIRONMENT_SCHEMA_VERSION = 1;
 
 export const ENVIRONMENT_IDENTITY_PATHS = Object.freeze({
-  before: '.qualification-inputs/beta-environment-before.json',
-  after: '.qualification-inputs/beta-environment-after.json',
+  before: '.e2e-inputs/beta-environment-before.json',
+  after: '.e2e-inputs/beta-environment-after.json',
 });
 export const ENVIRONMENT_VERDICT_PATH = 'test-results/beta-environment-verdict.json';
 
@@ -227,8 +233,8 @@ export function compareWorkerIdentity(before, after, { problem } = {}) {
 }
 
 // The verdict is the machine-readable answer to "was the platform redeployed
-// under us?" It annotates the run; it never turns a red run green, because a run
-// the platform was redeployed under cannot qualify the release.
+// under us?" It is attribution evidence for a reader; it never turns a red run green,
+// because a run the platform was redeployed under measured neither state.
 //
 // `suiteOutcome` is 'success', 'failure', or 'incomplete' for a suite that neither
 // passed nor produced a product failure - a cancelled run, or one the job timeout
@@ -276,14 +282,6 @@ export function environmentVerdict({ comparison, suiteOutcome }) {
   };
 }
 
-// The exact key set `environmentVerdict` returns. A consumer that validates a verdict
-// reads these instead of re-declaring them, so the shape has one owner.
-const VERDICT_FIELDS = Object.freeze(['schema_version', 'record_type', 'recorded_at', 'suite_outcome', 'verdict',
-  'attribution', 'product_failure_asserted', 'identity_coverage', 'reason', 'comparison']);
-const VERDICT_COMPARISON_FIELDS = Object.freeze(['before_observed_at', 'after_observed_at', 'before_identity_sha256',
-  'after_identity_sha256', 'before_task_arns', 'after_task_arns', 'added_task_arns', 'removed_task_arns',
-  'task_definition_changed']);
-
 // Missing and malformed inputs are evidence, not an error: the verdict records
 // that the comparison could not be established instead of failing the step and
 // leaving the failure unattributed.
@@ -298,74 +296,6 @@ export async function readOptionalEnvironmentJson(path) {
     return { record: JSON.parse(bytes.toString()), problem: null };
   } catch {
     return { record: null, problem: `${path} is not valid JSON` };
-  }
-}
-
-function validateEnvironmentVerdict(record) {
-  exactKeys(record, [...VERDICT_FIELDS], 'Beta environment verdict');
-  if (record.record_type !== ENVIRONMENT_VERDICT_RECORD_TYPE) {
-    throw new Error('Beta environment verdict record type changed');
-  }
-  if (record.schema_version !== ENVIRONMENT_SCHEMA_VERSION) {
-    throw new Error('Beta environment verdict schema version changed');
-  }
-  if (!['success', 'failure', 'incomplete'].includes(record.suite_outcome)) {
-    throw new Error('Beta environment verdict carries no known suite outcome');
-  }
-  if (typeof record.reason !== 'string' || record.reason.length === 0) {
-    throw new Error('Beta environment verdict carries no reason');
-  }
-  exactKeys(record.comparison, [...VERDICT_COMPARISON_FIELDS], 'Beta environment verdict comparison');
-  if (typeof record.comparison.task_definition_changed !== 'boolean') {
-    throw new Error('Beta environment verdict does not state whether the worker task definition changed');
-  }
-  for (const field of ['added_task_arns', 'removed_task_arns']) {
-    if (!Array.isArray(record.comparison[field])) throw new Error(`Beta environment verdict ${field} is not a list`);
-  }
-  return record;
-}
-
-// A run that cannot show the environment gate was consulted does not issue a release
-// record, so every unusable verdict is refused on this one sentence, which names where
-// the verdict was expected.
-function unestablishedEnvironmentVerdictMessage(detail, source) {
-  return `The Beta environment verdict at ${source} could not be established (${detail}), so the run cannot show `
-    + 'that the environment gate was consulted and no qualification record is issued.';
-}
-
-// The refusal sentence has exactly one producer so the thrown error and the workflow's
-// `::error` line cannot drift. It is a single sanitized line: the counts are integers
-// and the reason is the verdict's own, normalized to one line.
-export function qualificationRefusalMessage(record) {
-  const comparison = record?.comparison;
-  const added = Array.isArray(comparison?.added_task_arns) ? comparison.added_task_arns.length : 0;
-  const removed = Array.isArray(comparison?.removed_task_arns) ? comparison.removed_task_arns.length : 0;
-  const reason = String(record?.reason ?? 'the worker task definition changed during the suite')
-    .replace(/\s+/g, ' ').trim();
-  return 'A passing suite measured across two worker task definitions cannot issue a qualification record: '
-    + `${reason}. Worker tasks added: ${added}; removed: ${removed}. `
-    + 'Re-run the qualification on one stable worker task definition.';
-}
-
-// The qualification gate, and the policy's blocking half. It denies by default - a
-// verdict that is absent, unreadable or structurally wrong refuses the qualification
-// because the gate cannot be shown to have run - and it blocks exactly one condition: a
-// suite that passed while the worker task definition serving Beta changed. A rotation of
-// task ARNs on one unchanged definition still records and still qualifies, and a
-// definition change under a suite that already failed or never completed blocks nothing,
-// because no passing record is possible there either way.
-export function assertQualificationEnvironment(environment, { source = ENVIRONMENT_VERDICT_PATH } = {}) {
-  const { record, problem } = environment ?? {};
-  if (problem || !record || typeof record !== 'object' || Array.isArray(record)) {
-    throw new Error(unestablishedEnvironmentVerdictMessage(problem ?? 'no verdict record was provided', source));
-  }
-  try {
-    validateEnvironmentVerdict(record);
-  } catch (error) {
-    throw new Error(unestablishedEnvironmentVerdictMessage(error.message, source), { cause: error });
-  }
-  if (record.comparison.task_definition_changed === true && record.suite_outcome === 'success') {
-    throw new Error(qualificationRefusalMessage(record));
   }
 }
 
@@ -394,41 +324,9 @@ async function emitStepSummary(record) {
   await appendFile(target, `${lines.join('\n')}\n`);
 }
 
-async function emitQualificationGateSummary(message) {
-  const target = process.env.GITHUB_STEP_SUMMARY;
-  if (!target) return;
-  await appendFile(target, [
-    '### Qualification refused across two worker task definitions',
-    '',
-    message,
-    '',
-    'An ARN rotation on one unchanged worker task definition is recorded and does not block.',
-    'A change of that task definition cannot qualify a release; re-run the qualification on',
-    'one stable worker task definition.',
-    '',
-  ].join('\n'));
-}
-
-// The workflow's blocking half. The record path refuses to build a qualification record
-// for a suite that passed across two worker task definitions; this step makes the run
-// itself red so the refusal cannot be mistaken for a missing artifact. It reads the
-// recorded verdict and touches no AWS reader.
-async function qualificationGate({ output }) {
-  const environment = await readOptionalEnvironmentJson(output);
-  try {
-    assertQualificationEnvironment(environment, { source: output });
-  } catch (error) {
-    console.error(`::error title=Worker task definition changed during the suite::${error.message}`);
-    await emitQualificationGateSummary(error.message);
-    process.exitCode = 1;
-    return;
-  }
-  console.log(`No qualification refusal: ${output} reports no worker task definition change across a passing suite.`);
-}
-
-// The private AWS reader for the CLI: the qualification workflow holds the scoped Beta
-// credentials and no Playwright spec creates an AWS client, so the reader stays inside the
-// module the workflow invokes instead of being shared with the suite.
+// The private AWS reader for the CLI: the gate workflow holds the scoped Beta credentials
+// and no Playwright spec creates an AWS client, so the reader stays inside the module the
+// workflow invokes instead of being shared with the suite.
 function environmentAwsReader(profile) {
   return args => JSON.parse(execFileSync('aws', [...args, '--region', BETA_REGION,
     ...(profile ? ['--profile', profile] : []), '--output', 'json'], {
@@ -486,10 +384,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       afterPath: values.after ?? ENVIRONMENT_IDENTITY_PATHS.after,
       output: values.output ?? ENVIRONMENT_VERDICT_PATH,
     });
-  } else if (mode === 'qualification-gate') {
-    if (positionals.length !== 1) throw new Error('The qualification gate takes no positional arguments beyond its mode');
-    await qualificationGate({ output: values.output ?? ENVIRONMENT_VERDICT_PATH });
   } else {
-    throw new Error('The qualification environment supports the capture, verdict and qualification-gate modes');
+    throw new Error('The E2E environment supports the capture and verdict modes');
   }
 }

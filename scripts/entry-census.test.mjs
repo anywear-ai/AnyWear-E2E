@@ -31,20 +31,36 @@ const REMOVED_DRIFT_TOKENS = Object.freeze([
   'SMOKE_DRIFT_BASELINE',
   'artifact-zip',
 ]);
-// The nine files the remaining `full` steps produce. Both the handoff upload and the record
-// attach list them, in this order; the removal takes the drift file out of both and changes
-// nothing else, so a release consumer names the same surviving files.
-const QUALIFICATION_EVIDENCE_PATHS = Object.freeze([
-  '.qualification-inputs/live-identity.json',
-  '.qualification-inputs/service-release.json',
-  '.qualification-inputs/beta-environment-before.json',
-  '.qualification-inputs/beta-environment-after.json',
-  'deployment-evidence-before.json',
-  'deployment-evidence.json',
-  'qualification-record.json',
-  'test-results/qualification-report.json',
-  'test-results/beta-environment-verdict.json',
+// #358: the qualification ledger is removed. `record-reader-census.test.mjs` is the token-level
+// tombstone for a reintroduced producer; this census is the workflow-level one. Naming the job
+// and the artifacts here is what makes the removal guarded in the entry itself.
+const REMOVED_LEDGER_JOB = 'record';
+const REMOVED_LEDGER_ARTIFACTS = Object.freeze([
+  // `beta-qualification-<run>-<attempt>`, attached by the deleted `record` job.
+  'beta-qualification-${{',
+  // The `full` job's handoff to the deleted `record` job.
+  'beta-qualification-handoff-',
+  // The renamed diagnostics artifact; the old name must not come back.
+  'beta-qualification-diagnostics-',
 ]);
+const REMOVED_LEDGER_TOKENS = Object.freeze([
+  'qualification-record.json',
+  'verifyQualificationForPromotion',
+  'create-qualification-record',
+  'verify-qualification-record',
+  // The validation lane the ledger owned; the gate's verdict is the run's own conclusion.
+  'qualification:generate',
+  'qualification:verify',
+]);
+// The gate diagnostics artifact and the report path the run keeps for a reader. #358 renamed
+// both: the ledger's `beta-qualification-diagnostics-*` and `test-results/qualification-report
+// .json` no longer exist.
+const GATE_DIAGNOSTICS = 'beta-e2e-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}';
+const GATE_REPORT_PATH = 'test-results/beta-e2e-report.json';
+// The retired workflow file name. #358 renames the entry to `beta-e2e.yml` and leaves this file
+// as a refusal stub until AnyWear-Infra's dispatch rename has merged; this issue's step 5
+// deletes it. It must never carry a job that does work.
+const RETIRED_STUB = 'beta-qualification.yml';
 
 function jobSection(workflow, name) {
   const marker = `\n  ${name}:\n`;
@@ -56,7 +72,8 @@ function jobSection(workflow, name) {
 }
 
 const check = read('check.yml');
-const qualify = read('beta-qualification.yml');
+const qualify = read('beta-e2e.yml');
+const stub = read(RETIRED_STUB);
 const job = (name) => jobSection(qualify, name);
 
 // #344: the daily reconcile dispatch moved into `AnyWear-Infra`'s scheduled entry, so this
@@ -105,11 +122,13 @@ function uploadList(section, artifact) {
   return list;
 }
 
-test('the deployable unit exposes exactly two entries: one automatic check and one manual qualify', () => {
+test('the deployable unit exposes exactly two entries: one automatic check and one manual gate', () => {
   // #344: the daily account-reconcile dispatch is `AnyWear-Infra`'s scheduled entry now, so
-  // this repository is back to two entries: the automatic check and the manual qualify. A
-  // third workflow file cannot appear without failing this census.
-  assert.deepEqual(entries, ['beta-qualification.yml', 'check.yml']);
+  // this repository has two entries: the automatic check and the manual gate. #358 renames the
+  // manual entry to `beta-e2e.yml` and leaves the retired name as a refusal stub, which is not
+  // an entry: it declares no job that does work. A third real workflow file cannot appear
+  // without failing this census.
+  assert.deepEqual(entries, ['beta-e2e.yml', RETIRED_STUB, 'check.yml']);
 
   // The automatic entry absorbs quality and tool-regressions. `quality.yml` carried no path
   // filter, so the workflow-level union is unfiltered and tool-regressions now runs on every
@@ -127,7 +146,7 @@ test('the deployable unit exposes exactly two entries: one automatic check and o
   // #217: the manual `recover` operation is removed. The menu is the allow-list a dispatch
   // reads, so the removed operation must be absent from it and no `recover` job may exist.
   assert.doesNotMatch(operation, /recover/, 'the operation menu must not offer the removed recover operation');
-  assert.equal(job('recover'), '' , 'the qualify entry must not declare a recover job');
+  assert.equal(job('recover'), '' , 'the gate entry must not declare a recover job');
   // The retired measurement operation carried the only sizing stage input; nothing in the
   // entry may declare it again.
   assert.doesNotMatch(qualify, /sizing_stage/, 'the retired measurement operation carries no dispatch input');
@@ -145,58 +164,73 @@ test('the deployable unit exposes exactly two entries: one automatic check and o
   assert.match(trigger, /default: manual/);
   // #217/#344: `scheduled` is the daily reconcile dispatch from `AnyWear-Infra`'s scheduled
   // entry; it may only ask for the reconcile operation.
-  // #226: `deploy-qualify` is the deploy chain's qualification; it may only ask for full.
-  assert.match(trigger, /options: \[manual, deploy-smoke, deploy-qualify, release-qualify, scheduled\]/);
+  // #226: `deploy-gate` is the deploy chain's gate; it may only ask for full.
+  // #358: the canonical set is the gate wording. `deploy-qualify` and `release-qualify` are the
+  // two retired values, accepted only until AnyWear-Infra's step 4 merges and dispatches the new
+  // ones. This issue's step 5 deletes them from here and from the preflight validator.
+  assert.match(trigger, /options: \[manual, deploy-smoke, deploy-gate, release-gate, scheduled, deploy-qualify, release-qualify\]/);
   const dispatchedBy = inputBlock('dispatched_by');
-  assert.match(dispatchedBy, /required: false/);
+  // #358: required for every dispatch, because the run name renders it as its fourth segment
+  // (ADR-0027 §4). The preflight validates the HTTPS shape for every trigger.
+  assert.match(dispatchedBy, /required: true/);
   assert.match(dispatchedBy, /type: string/);
-  // The qualification entry reads no committed compatibility file and checks out no
-  // producer source: the live tuple comes from the deployed endpoints and the platform
-  // observation is this repository's own authenticated discovery of the live surface
-  // (`scripts/infra-observation.mjs`), with no producer source and no committed name list.
+  assert.match(dispatchedBy, /part of the run name/);
+  // The gate entry reads no committed compatibility file and checks out no producer source:
+  // the live tuple comes from the deployed endpoints. #358 removed the repository's own
+  // full-resource platform observation with the ledger, so the entry names no snapshot script.
   assert.doesNotMatch(qualify, /compatibility\.json/);
   assert.doesNotMatch(qualify, /check-compatibility\.mjs/);
   assert.doesNotMatch(qualify, /trusted-deployment-inputs\.mjs/);
   assert.doesNotMatch(qualify, /\.infra-source/);
+  assert.doesNotMatch(qualify, /infra-observation\.mjs/);
   assert.match(qualify, /node scripts\/service-release\.mjs/);
   assert.match(qualify, /minimum-supported-client\.json/);
 });
 
 // #226: the receiver changes by one trigger value, one run name and one queue key. The
 // single account-pool group keeps its non-cancelling property and now queues up to
-// GitHub's maximum, and the run name carries the dispatch key the release chain and the
-// dispatching hooks read back.
-test('the qualify entry queues its account pool and names each run with the dispatch key', () => {
+// GitHub's maximum, and the run name carries the dispatch key the dispatching hooks read back.
+test('the gate entry queues its account pool and names each run with the dispatch key', () => {
   assert.match(qualify, /^concurrency:\n {2}group: beta-e2e-account-pool\n {2}cancel-in-progress: false\n {2}queue: max$/m,
     'the single beta-e2e-account-pool group must stay non-cancelling and queue its runs');
 
-  // The release chain finds the record of a Service commit by the run name, and the Infra
-  // `qualify-hook` and the Client `handoff` read their own run URL back from it. A manual
-  // dispatch renders `-` for a missing expected commit and `@actor` for a missing dispatcher.
+  // #358: the run name is the cross-repository read contract. `AnyWear-Infra`'s
+  // `e2e-admission.mjs` filters the repository run list by the `Beta E2E gate: full` prefix, and
+  // `AnyWear-Meta` ADR-0027 §4 pins the whole name, so the prefix, the ` · ` separators and the
+  // four segments are pinned here. A dispatch with no expected commit renders `-`; every
+  // dispatch must carry `dispatched_by`, which is why the name has no actor fallback.
   const runName = /^run-name: (.+)$/m.exec(qualify)?.[1] ?? '';
-  assert.ok(runName.length > 0, 'the qualify entry must declare a run-name');
-  assert.match(runName, /Beta qualification: /, 'the run name must name the qualification');
+  assert.ok(runName.length > 0, 'the gate entry must declare a run-name');
+  assert.match(runName, /^"Beta E2E gate: /, 'the run name must carry the gate run-name prefix');
   for (const expression of [
     '${{ inputs.operation }}',
     '${{ inputs.trigger }}',
     "${{ inputs.expected_service_commit || '-' }}",
-    "${{ inputs.dispatched_by || format('@{0}', github.actor) }}",
+    '${{ inputs.dispatched_by }}',
   ]) {
     assert.ok(runName.includes(expression), `the run name must render ${expression}`);
   }
+  assert.doesNotMatch(runName, /github\.actor|format\('/,
+    'the run name must not fall back to the actor: ADR-0027 §4 pins `by <dispatched_by>`');
+  assert.equal(runName.split(' · ').length, 4, 'the run name must keep exactly four ` · ` separated segments');
 
   // The deploy chain's trigger is accepted only with its own payload: the full operation, a
   // supplied expected Service commit and worker slot offset 0 (the dispatching Infra run URL
   // is required by the non-manual rule). A smoke or slot-bearing dispatch is refused here,
-  // before the reconcile job or the suite.
-  const deployQualify = /^ {12}deploy-qualify\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
-  assert.ok(deployQualify.length > 0, 'the preflight must validate the deploy-qualify trigger');
-  assert.match(deployQualify, /trigger deploy-qualify requires operation full/);
-  assert.match(deployQualify, /trigger deploy-qualify requires expected_service_commit/);
-  assert.match(deployQualify, /trigger deploy-qualify requires worker_slot_offset 0/);
+  // before the reconcile job or the suite. #358 adds the gate spelling beside the retired one.
+  const deployGate = /^ {12}deploy-gate\|deploy-qualify\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
+  assert.ok(deployGate.length > 0, 'the preflight must validate the deploy-gate trigger');
+  assert.match(deployGate, /trigger \$TRIGGER requires operation full/);
+  assert.match(deployGate, /trigger \$TRIGGER requires expected_service_commit/);
+  assert.match(deployGate, /trigger \$TRIGGER requires worker_slot_offset 0/);
+  // The human re-gate accepts the same retired spelling on the same terms.
+  const releaseGate = /^ {12}release-gate\|release-qualify\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
+  assert.ok(releaseGate.length > 0, 'the preflight must validate the release-gate trigger');
+  assert.match(releaseGate, /trigger \$TRIGGER requires operation full/);
+  assert.match(releaseGate, /trigger \$TRIGGER requires expected_service_commit/);
 });
 
-test('the qualify chain keeps one credential job per operation and a credential-free record', () => {
+test('the gate chain keeps one credential job per operation and no ledger job', () => {
   const preflight = job('preflight');
   assert.ok(preflight.length > 0);
   assert.match(preflight, /permissions:\n {6}contents: read\n/);
@@ -210,7 +244,7 @@ test('the qualify chain keeps one credential job per operation and a credential-
 
   for (const operation of ['full', 'smoke']) {
     const section = job(operation);
-    assert.ok(section.length > 0, `the qualify entry must declare ${operation}`);
+    assert.ok(section.length > 0, `the gate entry must declare ${operation}`);
     assert.match(section, /needs: .*preflight/, `${operation} must need preflight`);
     assert.match(section, new RegExp(`if: github\\.ref == 'refs/heads/main' && needs\\.preflight\\.outputs\\.operation == '${operation}'`));
     assert.match(section, /environment: beta/);
@@ -221,11 +255,11 @@ test('the qualify chain keeps one credential job per operation and a credential-
     assert.match(section, /role-session-name: e2e-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/, `${operation} must set the run-scoped credential session`);
   }
 
-  // #217: the reconcile job is both its own operation and the job every qualification suite
-  // waits for. It gates on the validated preflight output, never on the raw dispatch input,
-  // and its bound is the 15 minutes the reviewed retention states.
+  // #217: the reconcile job is both its own operation and the job every gate suite waits for.
+  // It gates on the validated preflight output, never on the raw dispatch input, and its bound
+  // is the 15 minutes the reviewed retention states.
   const reconcile = job('reconcile');
-  assert.ok(reconcile.length > 0, 'the qualify entry must declare reconcile');
+  assert.ok(reconcile.length > 0, 'the gate entry must declare reconcile');
   assert.match(reconcile, /needs: preflight/);
   assert.match(reconcile, /if: github\.ref == 'refs\/heads\/main' && \(needs\.preflight\.outputs\.operation == 'reconcile' \|\| needs\.preflight\.outputs\.operation == 'full' \|\| needs\.preflight\.outputs\.operation == 'smoke'\)/);
   const reconcileIf = reconcile.match(/^ {4}if: (.+)$/m)?.[1] ?? '';
@@ -247,60 +281,49 @@ test('the qualify chain keeps one credential job per operation and a credential-
   assert.match(preflight, /7\|90\) ;;/);
   assert.match(preflight, /reconcile_lookback_days is only accepted by operation reconcile/);
   assert.match(reconcile, /node scripts\/reconcile-accounts\.mjs/);
-  // Every qualification suite runs after the reconcile job, so a run starts from a
-  // reconciled environment and cannot report a clean one it did not verify.
+  // Every gate suite runs after the reconcile job, so a run starts from a reconciled
+  // environment and cannot report a clean one it did not verify.
   for (const operation of ['full', 'smoke']) {
     assert.match(job(operation), /needs: \[preflight, reconcile\]/, `${operation} must run after reconcile`);
   }
 
-  // The record job holds no credential and runs only for full. Only full may produce the
-  // record; the record job validates and attaches it and is the last qualification job. The
-  // attached tuple is the live identity and the verified release, not a producer deployment
-  // record.
-  const record = job('record');
-  assert.ok(record.length > 0);
-  assert.match(record, /needs: \[preflight, full\]/);
-  assert.match(record, /if: github\.ref == 'refs\/heads\/main' && needs\.preflight\.outputs\.operation == 'full'/);
-  // #259: the drift gate is removed, so the credential-free `record` job needs no Actions read
-  // scope; `contents: read` is its whole permission block.
-  assert.match(record, /permissions:\n {6}contents: read\n\n {4}steps:/);
-  assert.doesNotMatch(record, /environment:|id-token|configure-aws-credentials/);
-  assert.match(job('full'), /qualification:generate/);
+  // #358: the credential-free `record` job is gone with the qualification ledger. The gate's
+  // verdict is the run's own conclusion, so no job validates, attaches or reproduces a record.
+  assert.equal(job(REMOVED_LEDGER_JOB), '', 'the gate entry must declare no record job');
+  assert.doesNotMatch(qualify, /verify-qualification-record\.mjs/);
+  for (const [name, section] of ['preflight', 'reconcile', 'full', 'smoke'].map((name) => [name, job(name)])) {
+    assert.doesNotMatch(section, /qualification:generate|qualification:verify/, `${name} must not produce or verify a ledger`);
+  }
 
-  // The release decision is the green `full` run plus the sealed record: there is no human
-  // approval job and no approval Environment. The dispatch event (actor and time), the run
-  // and the record tuple are the audit trail.
-  assert.equal(job('approve'), '', 'the qualify entry must not declare an approval job');
+  // The release decision is the green `full` run: there is no human approval job and no
+  // approval Environment. The dispatch event (actor and time) and the run object are the audit
+  // trail.
+  assert.equal(job('approve'), '', 'the gate entry must not declare an approval job');
   assert.match(qualify, /dispatched_by/);
   assert.doesNotMatch(qualify, /beta-release-approval/);
   assert.doesNotMatch(qualify, /AwaitingApproval|Approved|Rejected/);
-  for (const name of ['preflight', 'smoke', 'reconcile', 'record']) {
-    assert.doesNotMatch(job(name), /qualification:generate/, `${name} must not produce the qualification record`);
-  }
-  // `record` is the last job in the workflow.
-  assert.ok(qualify.trimEnd().endsWith('if-no-files-found: error'), 'record must be the last qualification job');
+  // The workflow's last job is `smoke`, which uploads the failure screenshots every operation
+  // keeps. No job follows it, and none reads another job's ledger.
+  assert.ok(qualify.trimEnd().endsWith('if-no-files-found: ignore'), 'smoke must be the last gate job');
 });
 
-test('the consumer-side drift gate is removed and both upload lists keep their nine files', () => {
-  // #259: the drift gate (#228) is deleted. `full` no longer consults another run's revision
-  // artifact, and the credential-free `record` job re-verifies nothing but the record. The
-  // deleted paths and tokens must not return; the pins below keep what the deletion had to
-  // leave standing.
+test('the consumer-side drift gate and the qualification ledger are removed from the entry', () => {
+  // #259: the drift gate (#228) is deleted, so `full` no longer consults another run's revision
+  // artifact. #358: the qualification ledger is deleted too, so no job validates or attaches a
+  // record. The deleted paths, jobs and artifacts must not return; the pins below keep what the
+  // deletions had to leave standing.
   const full = job('full');
-  const record = job('record');
 
-  // Both jobs keep only the scopes a remaining step uses. `full`'s block was byte-identical to
-  // `reconcile`'s before this change, so anchor on the key that follows it.
+  // `full` keeps only the scopes a remaining step uses.
   assert.match(full, /permissions:\n {6}contents: read\n {6}id-token: write\n {4}env:/);
-  assert.match(record, /permissions:\n {6}contents: read\n\n {4}steps:/);
   // Exactly one Actions read scope remains: `reconcile`'s own lifecycle lookback lists other
   // runs' artifacts, and no other job does.
   assert.equal([...qualify.matchAll(/^ {6}actions: read$/gm)].length, 1, 'only reconcile may hold actions: read');
   assert.match(job('reconcile'), /permissions:\n {6}actions: read\n {6}contents: read\n {6}id-token: write\n/);
-  // Neither job may authenticate to the Actions API: the removed drift steps held the only
-  // `secrets.GITHUB_TOKEN` uses in either.
-  for (const [name, section] of [['full', full], ['record', record]]) {
-    assert.doesNotMatch(section, /secrets\.GITHUB_TOKEN/, `${name} must hold no Actions API credential`);
+  // No gate job may authenticate to the Actions API: the removed drift steps held the only
+  // `secrets.GITHUB_TOKEN` uses outside `reconcile`, whose lifecycle lookback needs it.
+  for (const name of ['preflight', 'full', 'smoke']) {
+    assert.doesNotMatch(job(name), /secrets\.GITHUB_TOKEN/, `${name} must hold no Actions API credential`);
   }
 
   // `full` runs its own before-observation, the release-gating suite and the after-observation,
@@ -316,45 +339,63 @@ test('the consumer-side drift gate is removed and both upload lists keep their n
     assert.equal(existsSync(join(repositoryRoot, path)), false, `${path} must not be restored: the drift gate is removed (#259)`);
   }
   for (const token of REMOVED_DRIFT_TOKENS) {
-    assert.equal(qualify.includes(token), false, `the qualify entry must not name the removed drift-gate token ${token}`);
+    assert.equal(qualify.includes(token), false, `the gate entry must not name the removed drift-gate token ${token}`);
   }
 
-  // `full` hands off and `record` attaches exactly the nine files the remaining steps produce,
-  // in order: the deletion removes one path from each list and nothing else.
-  assert.deepEqual(uploadList(full, 'beta-qualification-handoff-${{ github.run_id }}-${{ github.run_attempt }}'), QUALIFICATION_EVIDENCE_PATHS);
-  assert.deepEqual(uploadList(record, 'beta-qualification-${{ github.run_id }}-${{ github.run_attempt }}'), QUALIFICATION_EVIDENCE_PATHS);
+  // #358: no ledger artifact and no ledger program may reappear in the entry. The diagnostics
+  // artifact keeps its own files under the gate name; the report path is the gate report.
+  for (const token of REMOVED_LEDGER_ARTIFACTS) {
+    assert.equal(qualify.includes(token), false, `the gate entry must not name the removed ledger artifact ${token}`);
+  }
+  for (const token of REMOVED_LEDGER_TOKENS) {
+    assert.equal(qualify.includes(token), false, `the gate entry must not name the removed ledger token ${token}`);
+  }
+  assert.equal(job(REMOVED_LEDGER_JOB), '', 'the gate entry must declare no record job');
+  assert.doesNotMatch(qualify, /qualification-record\.json/);
+  assert.deepEqual(uploadList(full, GATE_DIAGNOSTICS), [
+    '.e2e-inputs/live-identity.json',
+    '.e2e-inputs/service-release.json',
+    '.e2e-inputs/beta-environment-before.json',
+    '.e2e-inputs/beta-environment-after.json',
+    'deployment-evidence-before.json',
+    'deployment-evidence.json',
+    GATE_REPORT_PATH,
+    'test-results/beta-environment-verdict.json',
+    'test-results/**/error-context.md',
+  ]);
+  // The report the run keeps is declared once, as the job environment the reporter reads.
+  assert.match(qualify, new RegExp(`E2E_REPORT_PATH: ${GATE_REPORT_PATH.replaceAll('.', '\\.')}`));
+  assert.doesNotMatch(qualify, /E2E_QUALIFICATION_REPORT/);
 
   // The `smoke` diagnostic keeps its own evidence: the authenticated observation and its
-  // revision upload, which no machine reads any more, and no record.
+  // revision upload, which no machine reads any more, and no verdict of its own.
   const smoke = job('smoke');
   assert.match(smoke, /name: tested-revisions-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
-  assert.match(smoke, /pnpm qualification:collect/);
+  assert.match(smoke, /pnpm e2e:collect/);
   for (const name of ['preflight', 'smoke', 'reconcile']) {
     assert.doesNotMatch(job(name), /verify-smoke-drift/, `${name} must never run the removed drift gate`);
   }
 
   // No workflow may reference the deleted vendored contract.
-  for (const [name, source] of [['beta-qualification.yml', qualify], ['check.yml', check]]) {
+  for (const [name, source] of [['beta-e2e.yml', qualify], ['check.yml', check]]) {
     assert.doesNotMatch(source, /vendor/, `${name} must not reference the deleted vendored contract`);
   }
 });
 
-test('no qualification job downloads a producer deployment record or checks out producer source', () => {
-  for (const name of ['preflight', 'reconcile', 'full', 'smoke', 'record']) {
+test('no gate job downloads a producer deployment record or checks out producer source', () => {
+  for (const name of ['preflight', 'reconcile', 'full', 'smoke']) {
     const section = job(name);
     assert.doesNotMatch(section, /platform-deployment-record\.json/, `${name} must not retain the retired platform record`);
-    assert.doesNotMatch(section, /\.qualification-inputs\/deployment-record\.json/, `${name} must not retain the retired workload record`);
+    assert.doesNotMatch(section, /\.e2e-inputs\/deployment-record\.json/, `${name} must not retain the retired workload record`);
     assert.doesNotMatch(section, /repository: anywear-ai\/AnyWear-Infra/, `${name} must not check out the Infra observer`);
   }
-  // The full job records and retains the two files the v4 record is built from: the live
-  // tuple and the Service release identity (#193 renamed the identity input and removed
-  // the manifest bytes from the path).
-  for (const name of ['full', 'record']) {
-    const section = job(name);
-    assert.match(section, /\.qualification-inputs\/live-identity\.json/);
-    assert.match(section, /\.qualification-inputs\/service-release\.json/);
-    assert.doesNotMatch(section, /service-artifacts\.json/);
-  }
+  // The full job writes and retains the two files it reads the live tuple from: the live
+  // identity and the Service release identity (#193 renamed the identity input and removed the
+  // manifest bytes from the path).
+  const full = job('full');
+  assert.match(full, /\.e2e-inputs\/live-identity\.json/);
+  assert.match(full, /\.e2e-inputs\/service-release\.json/);
+  assert.doesNotMatch(full, /service-artifacts\.json/);
   assert.doesNotMatch(qualify, /service-artifacts\.json/);
   assert.doesNotMatch(qualify, /manifest_asset_id|manifest_sha256/);
 });
@@ -404,11 +445,13 @@ test('the daily reconcile dispatch belongs to AnyWear-Infra and no E2E schedule 
   assert.ok(scheduled.length > 0, 'the preflight must keep the scheduled trigger');
   assert.match(scheduled, /trigger scheduled requires operation reconcile/);
   assert.match(scheduled, /trigger scheduled requires worker_slot_offset 0/);
-  assert.match(inputBlock('trigger'), /options: \[manual, deploy-smoke, deploy-qualify, release-qualify, scheduled\]/);
+  // #358: the retired values stay in the closed set beside the gate values until this issue's
+  // step 5 deletes them from the input and the validator together.
+  assert.match(inputBlock('trigger'), /options: \[manual, deploy-smoke, deploy-gate, release-gate, scheduled, deploy-qualify, release-qualify\]/);
   assert.match(inputBlock('operation'), /options: \[full, smoke, reconcile\]/);
 });
 
-test('the preflight admits a qualification through one credential-free outbound writer read', () => {
+test('the preflight admits a gate through one credential-free outbound writer read', () => {
   // #344: the admission is one check in the credential-free preflight, carried by two steps:
   // one mints its own read-only App token for `AnyWear-Infra` (`actions: read` only, #344
   // allocation 7) with the same app id and private key the Service read uses, and the other
@@ -423,7 +466,7 @@ test('the preflight admits a qualification through one credential-free outbound 
   assert.match(token, /permission-actions: read/);
   assert.doesNotMatch(token, /permission-contents|permission-actions: write/);
 
-  const admission = stepSection(preflight, 'Admit this qualification only when no Infra writer holds the tuple');
+  const admission = stepSection(preflight, 'Admit this gate only when no Infra writer holds the tuple');
   assert.match(admission, /GH_TOKEN: \$\{\{ steps\.infra-writer-token\.outputs\.token \}\}/);
   assert.match(admission, /DISPATCHED_BY: \$\{\{ inputs\.dispatched_by \}\}/);
   // One declared command, and one input: the rule's only exemption is the dispatch's
@@ -432,29 +475,33 @@ test('the preflight admits a qualification through one credential-free outbound 
     ['run: node scripts/writer-admission.mjs --dispatched-by "$DISPATCHED_BY"']);
 
   // #344 review: the read belongs to the operator entry. `manual` is the human dispatch of all
-  // three operations and `release-qualify` the human re-qualification; the automated
-  // dispatches are the writer's own children, so the gate skips the read entirely for them
-  // instead of letting a queued foreign writer refuse them. Both steps carry the same gate, so
-  // an automated dispatch mints no token either.
+  // three operations and `release-gate` the human re-gate; the automated dispatches are the
+  // writer's own children, so the gate skips the read entirely for them instead of letting a
+  // queued foreign writer refuse them. Both steps carry the same gate, so an automated dispatch
+  // mints no token either.
+  //
+  // #358: `release-qualify` is the retired spelling of `release-gate`. It stays in the gate
+  // until the dispatcher's rename merges, because a dispatch that skipped the read would land a
+  // gate on a tuple a writer is changing; this issue's step 5 deletes it.
   const gate = /^ {8}if: (.+)$/m.exec(admission)?.[1] ?? '';
-  assert.equal(gate, "inputs.trigger == 'manual' || inputs.trigger == 'release-qualify'",
+  assert.equal(gate, "inputs.trigger == 'manual' || inputs.trigger == 'release-gate' || inputs.trigger == 'release-qualify'",
     'the admission must be gated on the operator triggers');
   assert.equal(/^ {8}if: (.+)$/m.exec(token)?.[1] ?? '', gate, 'the token mint must carry the admission gate');
 
   const gated = admittedTriggers(gate);
-  assert.deepEqual([...gated].sort(), ['manual', 'release-qualify'],
+  assert.deepEqual([...gated].sort(), ['manual', 'release-gate', 'release-qualify'],
     'only the operator dispatch triggers may reach the admission read');
-  // The deploy chain's `full` (`operation=full`, `trigger=deploy-qualify`), the deployment
-  // smoke and the daily reconcile are automated: they do not run the admission, so they
-  // cannot be refused by a queued foreign writer.
-  for (const automated of ['deploy-qualify', 'deploy-smoke', 'scheduled']) {
+  // The deploy chain's `full` (`operation=full`, `trigger=deploy-gate`), the deployment smoke,
+  // the daily reconcile and the retired automated spelling are automated: they do not run the
+  // admission, so they cannot be refused by a queued foreign writer.
+  for (const automated of ['deploy-gate', 'deploy-qualify', 'deploy-smoke', 'scheduled']) {
     assert.equal(gated.has(automated), false, `trigger ${automated} must skip the admission read`);
   }
 
   // The step sits after the source and operation-scope checks and before the Service read, so
   // it precedes every job that can hold an AWS credential; it declares no environment and no
   // AWS or OIDC material of its own.
-  const admissionIndex = preflight.indexOf('- name: Admit this qualification only when no Infra writer holds the tuple');
+  const admissionIndex = preflight.indexOf('- name: Admit this gate only when no Infra writer holds the tuple');
   assert.ok(admissionIndex > preflight.indexOf('- name: Require protected execution'));
   assert.ok(admissionIndex < preflight.indexOf('- name: Generate Service artifact read token'));
   assert.equal(existsSync(join(repositoryRoot, 'scripts', 'writer-admission.mjs')), true,
@@ -479,7 +526,7 @@ function stepSection(section, header) {
 
 test('both entries read the cleanup capability version from the deployment, once per job', () => {
   // No workflow reads the retired repository variable, in any spelling.
-  for (const [name, source] of [['beta-qualification.yml', qualify], ['check.yml', check]]) {
+  for (const [name, source] of [['beta-e2e.yml', qualify], ['check.yml', check]]) {
     assert.doesNotMatch(source, /vars\.BETA_CLEANUP_STATE_MACHINE_VERSION_ARN/, `${name} must not read the retired repository variable`);
   }
   const entries = [
@@ -552,4 +599,33 @@ test('no workflow or shipped script carries a version ARN or a second reader', (
     'only the teardown and the reconcile import the start guard, and neither resolves the value');
   // `minimum-supported-client.json` remains the only committed live-path input.
   assert.equal(existsSync(join(repositoryRoot, 'minimum-supported-client.json')), true);
+});
+
+test('the retired workflow name is a refusal stub, not a gate entry', () => {
+  // #358: the entry is renamed to `beta-e2e.yml`, but `AnyWear-Infra` keeps dispatching the old
+  // file name until its step 4 merges. A dispatch under the old name must land on a run that
+  // fails and says so, not on a 404 that leaves the Infra hold job with no run to observe. The
+  // stub therefore declares the dispatcher's input names (an undeclared input is a 422, so the
+  // dispatch would never reach the refusal) and does nothing else.
+  assert.equal(existsSync(join(directory, RETIRED_STUB)), true,
+    `${RETIRED_STUB} must stay as a refusal stub until this issue's step 5 deletes it`);
+  assert.match(stub, /^ {2}workflow_dispatch:$/m);
+  for (const name of ['operation', 'trigger', 'expected_service_commit', 'expected_client_commit',
+    'worker_slot_offset', 'dispatched_by', 'reconcile_lookback_days']) {
+    assert.match(stub, new RegExp(`^ {6}${name}:$`, 'm'),
+      `${RETIRED_STUB} must declare the ${name} input the dispatcher sends`);
+  }
+  // Exactly one job with exactly one step, and that step refuses with a non-zero exit.
+  assert.equal([...stub.matchAll(/^ {2}([a-z][a-z0-9-]*):$/gm)].length, 1, `${RETIRED_STUB} must declare exactly one job`);
+  assert.match(stub, /^ {10}exit 1$/m, `${RETIRED_STUB} must exit non-zero`);
+  assert.match(stub, /renamed to beta-e2e\.yml/, `${RETIRED_STUB} must name the new entry`);
+  // It holds no credential and runs nothing: no action, no environment, no token scope, no
+  // test command.
+  assert.match(stub, /^permissions: \{\}$/m, `${RETIRED_STUB} must request no token scope`);
+  for (const forbidden of [/uses:/, /environment:/, /id-token/, /configure-aws-credentials/, /secrets\./,
+    /pnpm/, /playwright/, /actions\/upload-artifact|actions\/download-artifact/]) {
+    assert.doesNotMatch(stub, forbidden, `${RETIRED_STUB} must hold no credential and run no test (${forbidden})`);
+  }
+  // It is not a ledger either: neither ledger artifact name may appear.
+  for (const token of REMOVED_LEDGER_ARTIFACTS) assert.equal(stub.includes(token), false, `${RETIRED_STUB} must not name ${token}`);
 });

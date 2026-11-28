@@ -153,11 +153,10 @@ runtime-drill-plan.json
 runtime-preflight.json
 runtime-drill-evidence.json
 
-# Immutable qualification inputs and authenticated observations
+# Live gate inputs and authenticated observations (#358 removed the ledger outputs)
 .infra-source/
-.qualification-inputs/
+.e2e-inputs/
 deployment-evidence*.json
-qualification-record.json
 github-cli-version.txt
 recovery/
 .worktree/

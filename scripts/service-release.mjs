@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseStrictJson, repositories, requireCommit, requireId } from './evidence-contract.mjs';
 import { ghApi, repositoryReadEnvironment, resolveTagCommit } from './github-read.mjs';
-import { collectDeploymentEvidence, SERVICE_RELEASE_ASSET_NAMES, serviceArtifactsTag } from './qualification-record.mjs';
+import { collectDeploymentEvidence, SERVICE_RELEASE_ASSET_NAMES, serviceArtifactsTag } from './deployment-evidence.mjs';
 
 // #180/#193: the live Service identity must resolve to one immutable release, and this is
 // the credential-free reader that proves it. It performs no AWS call, no mutation and no
@@ -194,7 +194,7 @@ export async function runServiceRelease({
     api,
     environment,
   });
-  const directory = resolve(inputsDirectory ?? options.inputsDir ?? environment.QUALIFICATION_INPUTS_DIR ?? '.qualification-inputs');
+  const directory = resolve(inputsDirectory ?? options.inputsDir ?? environment.E2E_INPUTS_DIR ?? '.e2e-inputs');
   await mkdir(directory, { recursive: true });
   const live = {
     client: { ...identity.client, client_version: identity.client_version },

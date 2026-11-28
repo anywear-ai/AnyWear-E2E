@@ -105,8 +105,21 @@ export const ARTIFACT_PAGE_SIZE = 100;
  */
 export const MAX_ARTIFACT_PAGES = 500;
 export const ARTIFACT_DIGEST = /^sha256:[a-f0-9]{64}$/;
-/** The one workflow that may produce a lifecycle artifact a reconcile treats as authoritative. */
-export const LIFECYCLE_WORKFLOW_PATH = '.github/workflows/beta-qualification.yml';
+/**
+ * The gate entry whose `workflow_dispatch` run a lifecycle artifact must name to be
+ * authoritative.
+ *
+ * #358 renamed the entry from `beta-qualification.yml` to `beta-e2e.yml`. A lifecycle artifact
+ * written before the rename is still inside the 7-day lookback window (90 days for the one
+ * migration dispatch) and names the retired run path, so both paths bind: dropping the retired
+ * one would silently ignore those artifacts and degrade attribution to CloudTrail alone.
+ *
+ * Design exception ④: the retired path is the one transitional literal this issue keeps in the
+ * final tree. A named follow-up change removes it once the lookback window has expired.
+ */
+export const LIFECYCLE_WORKFLOW_PATH = '.github/workflows/beta-e2e.yml';
+export const RETIRED_LIFECYCLE_WORKFLOW_PATH = '.github/workflows/beta-qualification.yml';
+export const LIFECYCLE_WORKFLOW_PATHS = Object.freeze([LIFECYCLE_WORKFLOW_PATH, RETIRED_LIFECYCLE_WORKFLOW_PATH]);
 export const E2E_QUALIFICATION_CALLER = /^arn:aws:sts::650880818323:assumed-role\/beta-e2e-qualification-role\/[A-Za-z0-9+=,.@_-]{1,64}$/;
 export const E2E_QUALIFICATION_ROLE = /^arn:aws:iam::650880818323:role\/beta-e2e-qualification-role$/;
 /** The run-scoped credential session every protected credential step assumes. */
@@ -428,8 +441,9 @@ export function lifecycleArtifactBinding(artifact) {
 
 /**
  * The cached `GET actions/runs/<run>` half of the binding: the artifact must have been produced
- * by the protected `main` `workflow_dispatch` run of `beta-qualification.yml`, at the same head
- * the artifact recorded.
+ * by the protected `main` `workflow_dispatch` run of the gate entry, at the same head the
+ * artifact recorded. Both the current path and the retired pre-#358 path bind (design
+ * exception ④), so an artifact from either side of the rename stays authoritative.
  *
  * A readable run that fails any of these checks is a verdict, not an exception: the artifact is
  * ignored and counted in `sources.artifacts_ignored`, and it is never authoritative. Only an
@@ -438,7 +452,7 @@ export function lifecycleArtifactBinding(artifact) {
  */
 export function lifecycleWorkflowRunBinding(run, headSha) {
   if (!run || typeof run !== 'object' || Array.isArray(run)) return { bound: false, reason: 'run' };
-  if (run.path !== LIFECYCLE_WORKFLOW_PATH) return { bound: false, reason: 'path' };
+  if (!LIFECYCLE_WORKFLOW_PATHS.includes(run.path)) return { bound: false, reason: 'path' };
   if (run.event !== 'workflow_dispatch') return { bound: false, reason: 'event' };
   if (run.head_branch !== 'main') return { bound: false, reason: 'branch' };
   if (run.head_sha !== headSha) return { bound: false, reason: 'head-sha' };

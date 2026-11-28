@@ -76,6 +76,27 @@ const REMOVED_DRIFT_TOKENS = Object.freeze([
   'readArtifactZip',
 ]);
 
+// #358 removed the Beta qualification ledger: the record producer, the independent verifier,
+// the `record` job and the two archived artifacts. The gate's verdict is the run's own
+// conclusion, and nothing outside a test may name the ledger again.
+//
+// Requirement 2's closing clause asked to remove "the corresponding census/record unit tests".
+// The design records the correction (§4): this file guards a different, already-removed reader,
+// and it is the ledger's anti-resurrection tombstone. Deleting the guard in the same delivery
+// that deletes the ledger would leave the next reintroduction to a human reviewer, so the file
+// stays and the ledger's forbidden tokens are added here. The tokens appear below in their
+// forbidden role and nowhere else in a non-test module.
+const REMOVED_LEDGER_TOKENS = Object.freeze([
+  // The v4 record file the `record` job attached.
+  'qualification-record.json',
+  // Its `record_type`.
+  'anywear_beta_qualification',
+  // The `<run>-<attempt>` archive and the `<run>-<attempt>` handoff artifact names.
+  'beta-qualification-',
+  // The promotion-time verifier the deleted record module exported.
+  'verifyQualificationForPromotion',
+]);
+
 const posix = (path) => relative(repositoryRoot, path).replace(/\\/g, '/');
 
 function moduleFiles() {
@@ -136,4 +157,23 @@ test('the removed smoke-drift gate and its ZIP reader appear in no non-test modu
   const found = offenders(REMOVED_DRIFT_TOKENS, { skipTests: true });
   assert.deepEqual(found, [],
     `the removed drift gate and its ZIP reader may appear nowhere outside a test; found:\n${found.join('\n')}`);
+});
+
+test('the removed qualification ledger appears in no non-test module', () => {
+  // #358: the ledger's producer, verifier and artifacts are gone. A non-test module that names
+  // one of these tokens is a reintroduction attempt (or a dead call site of the deleted
+  // producer), and `pnpm check` fails here rather than in a review that has to notice it.
+  const found = offenders(REMOVED_LEDGER_TOKENS, { skipTests: true });
+  assert.deepEqual(found, [],
+    `the removed qualification ledger may appear nowhere outside a test; found:\n${found.join('\n')}`);
+  // The census is the only non-test-exempt place that names them, and it must keep naming them:
+  // an empty token list would make the assertion above vacuous.
+  for (const token of ['qualification-record.json', 'anywear_beta_qualification', 'beta-qualification-',
+    'verifyQualificationForPromotion']) {
+    assert.ok(REMOVED_LEDGER_TOKENS.includes(token), `${token} must stay a forbidden ledger token`);
+  }
+  // The retired workflow file name is not one of these tokens: `beta-qualification.yml` is the
+  // refusal stub this repository keeps until this issue's step 5, and its name carries no
+  // trailing hyphen after `qualification`.
+  assert.equal(REMOVED_LEDGER_TOKENS.some((token) => token === 'beta-qualification.yml'), false);
 });
