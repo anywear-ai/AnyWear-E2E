@@ -1,14 +1,15 @@
 name: Beta E2E gate
 # AnyWear #358: this run *is* the gate verdict. A green `full` run whose name states the
 # operation, the trigger, the expected Service commit (`-` when none was supplied) and the
-# dispatching run is the whole release decision: there is no ledger artifact, no `record` job
+# dispatching run URL — or, for a hand dispatch, the `@<actor>` that started it (#363) — is the
+# whole release decision: there is no ledger artifact, no `record` job
 # and no cross-repository record lookup. The verdict words are the run's own `conclusion`.
 #
 # The run name is a cross-repository read contract: `AnyWear-Infra`'s `e2e-admission.mjs`
 # filters its repository run list by the `Beta E2E gate: full` prefix, and its `e2e-hold` job
 # reads this run's URL back from its own dispatch. Keep the ` · ` separators and the four
 # segments exactly as they are.
-run-name: "Beta E2E gate: ${{ inputs.operation }} · ${{ inputs.trigger }} · ${{ inputs.expected_service_commit || '-' }} · by ${{ inputs.dispatched_by }}"
+run-name: "Beta E2E gate: ${{ inputs.operation }} · ${{ inputs.trigger }} · ${{ inputs.expected_service_commit || '-' }} · by ${{ inputs.dispatched_by || format('@{0}', github.actor) }}"
 
 # The E2E deployable unit's single manual entry: the gate. One protected dispatch surface
 # carries three operations — `full` (the release gate), `smoke` (deployed diagnostic) and
@@ -71,12 +72,14 @@ on:
         type: choice
         options: [manual, deploy-smoke, deploy-gate, release-gate, scheduled]
       dispatched_by:
-        # AnyWear #358: required for every dispatch, because the run name renders it as its
-        # fourth segment and `AnyWear-Meta` ADR-0027 §4 pins that name as a machine-read
-        # contract. A dispatch without it would render `by ` and produce an unparseable name,
-        # so the preflight refuses it for every trigger instead of falling back to an actor.
-        description: HTTPS URL of the run that dispatched this gate; required for every dispatch because it is part of the run name
-        required: true
+        # #363: the dispatching run's HTTPS URL, and only that. It is empty for a hand dispatch,
+        # whose run name states the `@<actor>` that started it instead, so `manual` and a direct
+        # `release-gate` carry no value. A non-empty value is accepted only from a dispatch an
+        # app identity created (`github.actor` ends in `[bot]`), which is what keeps a person's
+        # value out of the writer admission's one exemption comparison.
+        description: HTTPS URL of the run that dispatched this gate; leave empty for a hand dispatch, whose run name states the actor instead
+        required: false
+        default: ''
         type: string
       worker_slot_offset:
         description: First captured worker slot (each operation allocates two; choose unused slots)
@@ -180,6 +183,7 @@ jobs:
           EXPECTED_SERVICE_COMMIT: ${{ inputs.expected_service_commit }}
           EXPECTED_CLIENT_COMMIT: ${{ inputs.expected_client_commit }}
           DISPATCHED_BY: ${{ inputs.dispatched_by }}
+          DISPATCH_ACTOR: ${{ github.actor }}
           WORKER_SLOT_OFFSET: ${{ inputs.worker_slot_offset }}
           RECONCILE_LOOKBACK_DAYS: ${{ inputs.reconcile_lookback_days }}
         run: |
@@ -205,14 +209,20 @@ jobs:
             exit 1
           fi
           # #180/#358: the dispatch trigger is a closed combination with the operation, the
-          # expected commits, the worker slot offset and the dispatching run URL.
+          # expected commits and the worker slot offset. #363 states the `dispatched_by` rule per
+          # trigger: only an automation dispatch names the run that started it.
           case "$TRIGGER" in
             manual)
-              # #358: `manual` carries no trigger-specific rule. It used to refuse a
-              # `dispatched_by`, which the run-name contract now requires from every dispatch;
-              # the URL itself is validated for every trigger below.
+              # #363: `manual` is a hand dispatch, so it names no dispatching run and must carry
+              # no `dispatched_by`; the run name's fourth segment is the `@<actor>` instead.
+              if [[ -n "$DISPATCHED_BY" ]]; then
+                echo "::error::trigger manual accepts no dispatched_by; a hand dispatch has no dispatching run (got '$DISPATCHED_BY')"
+                exit 1
+              fi
               ;;
             deploy-smoke)
+              # #363: the deployment smoke hook is an automation dispatch, so it names the run
+              # that dispatched it; the run name's fourth segment renders that URL.
               if [[ "$OPERATION" != smoke ]]; then
                 echo "::error::trigger deploy-smoke requires operation smoke (got '$OPERATION')"
                 exit 1
@@ -225,8 +235,16 @@ jobs:
                 echo "::error::trigger deploy-smoke requires worker_slot_offset 0 (got '$WORKER_SLOT_OFFSET')"
                 exit 1
               fi
+              if [[ -z "$DISPATCHED_BY" ]]; then
+                echo "::error::trigger $TRIGGER is an automation dispatch and requires dispatched_by as the dispatching run's HTTPS URL"
+                exit 1
+              fi
               ;;
             release-gate)
+              # #363: `release-gate` accepts both shapes. It is empty for a direct operator
+              # re-gate — a hand dispatch, whose run name states `@<actor>` — and it is the
+              # scheduled entry's own run URL when `AnyWear-Infra`'s `schedule.yml` dispatches
+              # this gate. Any non-empty `dispatched_by` is validated by the shared rule below.
               if [[ "$OPERATION" != full ]]; then
                 echo "::error::trigger $TRIGGER requires operation full (got '$OPERATION')"
                 exit 1
@@ -244,8 +262,8 @@ jobs:
               # #226: the deploy chain's gate names the Service commit it deployed. It is the
               # `full` the Infra `e2e-hold` job dispatches, so a dispatch with any other
               # operation, no expected commit or a displaced worker slot is a mistake refused
-              # here, before the reconcile job or the suite. The dispatching Infra run URL is
-              # required by the `dispatched_by` rule below, like every other trigger.
+              # here, before the reconcile job or the suite. #363: it is an automation dispatch,
+              # so it must name the dispatching Infra run's HTTPS URL.
               if [[ "$OPERATION" != full ]]; then
                 echo "::error::trigger $TRIGGER requires operation full (got '$OPERATION')"
                 exit 1
@@ -258,6 +276,10 @@ jobs:
                 echo "::error::trigger $TRIGGER requires worker_slot_offset 0 (got '$WORKER_SLOT_OFFSET')"
                 exit 1
               fi
+              if [[ -z "$DISPATCHED_BY" ]]; then
+                echo "::error::trigger $TRIGGER is an automation dispatch and requires dispatched_by as the dispatching run's HTTPS URL"
+                exit 1
+              fi
               ;;
             scheduled)
               # #217/#344: the daily account-reconcile dispatch belongs to `AnyWear-Infra`'s
@@ -265,6 +287,7 @@ jobs:
               # requires `workflow_dispatch` and a `schedule` event would fail closed. It may
               # only ask for the reconcile operation. This repository keeps no schedule entry
               # of its own: the daily dispatch has one starter, in the writer repository.
+              # #363: it is an automation dispatch, so it names the dispatching run's HTTPS URL.
               if [[ "$OPERATION" != reconcile ]]; then
                 echo "::error::trigger scheduled requires operation reconcile (got '$OPERATION')"
                 exit 1
@@ -273,19 +296,31 @@ jobs:
                 echo "::error::trigger scheduled requires worker_slot_offset 0 (got '$WORKER_SLOT_OFFSET')"
                 exit 1
               fi
+              if [[ -z "$DISPATCHED_BY" ]]; then
+                echo "::error::trigger $TRIGGER is an automation dispatch and requires dispatched_by as the dispatching run's HTTPS URL"
+                exit 1
+              fi
               ;;
             *)
               echo "::error::Unknown gate trigger '$TRIGGER'"
               exit 1
               ;;
           esac
-          # #358: every dispatch names the run that dispatched it, because the run name renders
-          # that URL as its fourth segment (ADR-0027 §4) and the operator admission reads it as
-          # its one exemption comparison. A missing or non-HTTPS value is refused here for
-          # every trigger, so the name can never be emitted with an empty segment.
-          if [[ ! "$DISPATCHED_BY" =~ ^https://[^[:space:]]+$ ]]; then
-            echo "::error::trigger $TRIGGER requires dispatched_by as the HTTPS URL of the dispatching run (got '$DISPATCHED_BY')"
-            exit 1
+          # #363: `dispatched_by` is present exactly when a workflow dispatched the gate.
+          # `manual` and a direct `release-gate` are hand dispatches and carry no value, so the
+          # run name states `@<actor>` instead. A non-empty value is accepted only from a run an
+          # app identity created — `github.actor` ends in `[bot]` for an App installation token
+          # and never for a person's login — so no value a person supplies can reach the writer
+          # admission's one exemption comparison.
+          if [[ -n "$DISPATCHED_BY" ]]; then
+            if [[ ! "$DISPATCHED_BY" =~ ^https://[^[:space:]]+$ ]]; then
+              echo "::error::trigger $TRIGGER requires dispatched_by as the HTTPS URL of the dispatching run (got '$DISPATCHED_BY')"
+              exit 1
+            fi
+            if [[ "$DISPATCH_ACTOR" != *'[bot]' ]]; then
+              echo "::error::trigger $TRIGGER accepts dispatched_by only from a run an app identity created; a hand dispatch carries none (actor '$DISPATCH_ACTOR')"
+              exit 1
+            fi
           fi
           # Both expected commits are optional, and only the release-gating operation may
           # compare them with the live deployment.
