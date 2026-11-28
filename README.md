@@ -91,7 +91,8 @@ signed `operation` field, not by a workflow boundary, a step or a job. One prote
 dispatch surface, the gate entry in `beta-e2e.yml`, carries `full`, `smoke` and `reconcile`.
 There is no qualification ledger any more (#358): `full`'s own run is the verdict, so the
 release decision is that run's `conclusion`, its run name (operation, trigger, expected
-Service commit and the dispatching run URL every dispatch supplies) and its
+Service commit, and the dispatching run URL of a workflow dispatch or the `@<actor>` a hand
+dispatch states) and its
 `beta-e2e-diagnostics-*` artifact. A `smoke` or
 `reconcile` run can therefore neither produce nor withhold the verdict the `full` run
 carries, and a reconcile result is never substituted for gate evidence. The
@@ -199,8 +200,8 @@ daily reconcile dispatch from `AnyWear-Infra`'s scheduled entry) and
 whose run name states `@<actor>` instead, and accepted only from a run an app identity created),
 and the credential-free
 preflight validates that combination before any credential job — a value on `manual`, a
-non-HTTPS value, or a value supplied by a run a person created, like a retired trigger
-spelling, is refused there by name. For an operator
+non-HTTPS value, or a value from a run a person created — like a retired trigger
+spelling — is refused there by name. For an operator
 dispatch
 (`trigger=manual`, all three operations, or `trigger=release-gate`) the preflight also
 performs the outbound writer admission (#344): it lists the nonterminal `AnyWear-Infra` writer
