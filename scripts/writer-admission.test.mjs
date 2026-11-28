@@ -51,7 +51,7 @@ test('a self-dispatched writer run is admitted while its own hold job is nonterm
   const parent = 101;
   const read = reader({
     runs: { [runsPath('mutate.yml', 'in_progress')]: runList(runEntry(parent)) },
-    jobs: { [jobsPath(parent)]: jobList({ name: 'qualify-hold', status: 'in_progress' }) },
+    jobs: { [jobsPath(parent)]: jobList({ name: 'e2e-hold', status: 'in_progress' }) },
   });
   const result = await evaluateWriterAdmission({ dispatchedBy: runUrl(parent), run: read });
 
@@ -70,17 +70,17 @@ test('a foreign writer run with a nonterminal hold job refuses by name', async (
   const holder = 202;
   const read = reader({
     runs: { [runsPath('mutate.yml', 'in_progress')]: runList(runEntry(holder)) },
-    jobs: { [jobsPath(holder)]: jobList({ name: 'deploy', status: 'completed' }, { name: 'qualify-hold', status: 'in_progress' }) },
+    jobs: { [jobsPath(holder)]: jobList({ name: 'deploy', status: 'completed' }, { name: 'e2e-hold', status: 'in_progress' }) },
   });
   const result = await evaluateWriterAdmission({ dispatchedBy: runUrl(101), run: read });
 
   assert.equal(result.admitted, false);
   assert.equal(result.holder.url, runUrl(holder));
-  assert.equal(result.holder.holdJob, 'qualify-hold');
+  assert.equal(result.holder.holdJob, 'e2e-hold');
   assert.equal(result.holder.holdStatus, 'in_progress');
   // The first thing the operator reads is the run they have to wait for or cancel.
   assert.equal(result.refusal.startsWith(`${runUrl(holder)} is holding the Beta tuple`), true);
-  assert.match(result.refusal, /its qualify-hold job is "in_progress"/);
+  assert.match(result.refusal, /its e2e-hold job is "in_progress"/);
   // The queued alternative: the Infra scheduled entry, which waits in the group.
   assert.match(result.refusal, /schedule\.yml/);
   assert.match(result.refusal, /operation=smoke/);
@@ -103,30 +103,40 @@ test('the scheduled entry holds through its hold job', async () => {
   assert.ok(result.refusal.includes(runUrl(holder)));
 });
 
-// #358: `AnyWear-Infra` renames `mutate.yml`'s hold job `qualify-hold` → `e2e-hold` in its
-// step 4, after this repository's workflow rename. During the transition both names hold: a
-// read that knew only one of them would report "no holder" for a run that is still holding the
-// tuple, which is the one failure this module exists to prevent.
-test('both the current and the retired mutate.yml hold-job names hold', async () => {
+// #358: `AnyWear-Infra` renamed `mutate.yml`'s hold job to `e2e-hold`. The retired spelling is
+// gone from the accepted set, so a run whose only hold job still carries the old name reports no
+// holder: a stale spelling can no longer mask a writer holding the tuple.
+test('only the current mutate.yml hold-job name holds', async () => {
   assert.deepEqual({ ...INFRA_WRITER_HOLD_JOBS }, {
-    'mutate.yml': ['qualify-hold', 'e2e-hold'],
+    'mutate.yml': ['e2e-hold'],
     'schedule.yml': ['hold'],
   });
-  for (const name of ['qualify-hold', 'e2e-hold']) {
-    const holder = name === 'qualify-hold' ? 204 : 205;
-    const read = reader({
-      runs: { [runsPath('mutate.yml', 'in_progress')]: runList(runEntry(holder)) },
-      jobs: { [jobsPath(holder)]: jobList({ name, status: 'in_progress' }) },
-    });
-    const result = await evaluateWriterAdmission({ dispatchedBy: runUrl(101), run: read });
-    assert.equal(result.admitted, false, `${name} must hold`);
-    assert.equal(result.holder.holdJob, name);
-    assert.match(result.refusal, new RegExp(`its ${name} job is "in_progress"`));
-    // The same job name only holds while it is nonterminal.
-    assert.equal(holdingJob([{ name, status: 'completed' }], INFRA_WRITER_HOLD_JOBS['mutate.yml']), null);
-    assert.equal(holdingJob([{ name: 'deploy', status: 'in_progress' }], INFRA_WRITER_HOLD_JOBS['mutate.yml']), null);
-  }
-  // The scheduled entry's job name is unchanged and is judged by its own list.
+  const holder = 204;
+  const read = reader({
+    runs: { [runsPath('mutate.yml', 'in_progress')]: runList(runEntry(holder)) },
+    jobs: { [jobsPath(holder)]: jobList({ name: 'e2e-hold', status: 'in_progress' }) },
+  });
+  const result = await evaluateWriterAdmission({ dispatchedBy: runUrl(101), run: read });
+  assert.equal(result.admitted, false, 'e2e-hold must hold');
+  assert.equal(result.holder.holdJob, 'e2e-hold');
+  assert.match(result.refusal, /its e2e-hold job is "in_progress"/);
+
+  // The retired name is not accepted, in any position.
+  assert.equal(holdingJob([{ name: 'qualify-hold', status: 'in_progress' }], INFRA_WRITER_HOLD_JOBS['mutate.yml']), null,
+    'the retired qualify-hold name must not hold');
+  assert.equal(INFRA_WRITER_HOLD_JOBS['mutate.yml'].includes('qualify-hold'), false,
+    'the retired qualify-hold name must be gone from the accepted set');
+  const retiredRead = reader({
+    runs: { [runsPath('mutate.yml', 'in_progress')]: runList(runEntry(205)) },
+    jobs: { [jobsPath(205)]: jobList({ name: 'qualify-hold', status: 'in_progress' }) },
+  });
+  assert.equal((await evaluateWriterAdmission({ dispatchedBy: runUrl(101), run: retiredRead })).admitted, true,
+    'a retired-named hold job is not a holder');
+
+  // The current name only holds while it is nonterminal, and no other job name holds.
+  assert.equal(holdingJob([{ name: 'e2e-hold', status: 'completed' }], INFRA_WRITER_HOLD_JOBS['mutate.yml']), null);
+  assert.equal(holdingJob([{ name: 'deploy', status: 'in_progress' }], INFRA_WRITER_HOLD_JOBS['mutate.yml']), null);
+  // The scheduled entry keeps its own name and is judged by its own list.
   assert.equal(holdingJob([{ name: 'hold', status: 'in_progress' }], INFRA_WRITER_HOLD_JOBS['schedule.yml']).name, 'hold');
   assert.equal(holdingJob([{ name: 'e2e-hold', status: 'in_progress' }], INFRA_WRITER_HOLD_JOBS['schedule.yml']), null);
 });
@@ -139,7 +149,7 @@ test('a nonterminal writer run whose hold job is terminal or absent admits', asy
   const read = reader({
     runs: { [runsPath('mutate.yml', 'queued')]: runList(runEntry(terminal), runEntry(absent)) },
     jobs: {
-      [jobsPath(terminal)]: jobList({ name: 'qualify-hold', status: 'completed' }),
+      [jobsPath(terminal)]: jobList({ name: 'e2e-hold', status: 'completed' }),
       [jobsPath(absent)]: jobList({ name: 'verify', status: 'in_progress' }, { name: 'deploy', status: 'queued' }),
     },
   });
@@ -147,8 +157,8 @@ test('a nonterminal writer run whose hold job is terminal or absent admits', asy
 
   assert.equal(result.admitted, true);
   assert.deepEqual(result.warnings, []);
-  assert.equal(holdingJob([{ name: 'qualify-hold', status: 'completed' }], 'qualify-hold'), null);
-  assert.equal(holdingJob([{ name: 'deploy', status: 'in_progress' }], 'qualify-hold'), null);
+  assert.equal(holdingJob([{ name: 'e2e-hold', status: 'completed' }], 'e2e-hold'), null);
+  assert.equal(holdingJob([{ name: 'deploy', status: 'in_progress' }], 'e2e-hold'), null);
 });
 
 // (d) Fail open: an unreadable run list warns and admits, and an unreadable job list warns
@@ -185,10 +195,9 @@ test('an unreadable run list or job list warns and admits', async () => {
 // writer workflows, one request per pair.
 test('the read queries exactly the five nonterminal statuses and both writer workflows', async () => {
   assert.deepEqual([...NONTERMINAL_RUN_STATUSES], ['requested', 'waiting', 'pending', 'queued', 'in_progress']);
-  // #358: `mutate.yml` accepts both hold-job names during the transition, `schedule.yml` keeps
-  // `hold`.
+  // #358: `mutate.yml` accepts only its renamed hold job, `schedule.yml` keeps `hold`.
   assert.deepEqual({ ...INFRA_WRITER_HOLD_JOBS }, {
-    'mutate.yml': ['qualify-hold', 'e2e-hold'],
+    'mutate.yml': ['e2e-hold'],
     'schedule.yml': ['hold'],
   });
 
@@ -247,7 +256,7 @@ test('a run that is listed twice is judged once', async () => {
       [runsPath('mutate.yml', 'requested')]: runList(runEntry(holder)),
       [runsPath('mutate.yml', 'queued')]: runList(runEntry(holder)),
     },
-    jobs: { [jobsPath(holder)]: jobList({ name: 'qualify-hold', status: 'completed' }) },
+    jobs: { [jobsPath(holder)]: jobList({ name: 'e2e-hold', status: 'completed' }) },
   });
   const result = await evaluateWriterAdmission({ run: read });
   assert.equal(result.admitted, true);
@@ -258,7 +267,7 @@ test('the command line refuses with an error annotation and admits with a warnin
   const holder = 707;
   const held = reader({
     runs: { [runsPath('mutate.yml', 'in_progress')]: runList(runEntry(holder)) },
-    jobs: { [jobsPath(holder)]: jobList({ name: 'qualify-hold', status: 'in_progress' }) },
+    jobs: { [jobsPath(holder)]: jobList({ name: 'e2e-hold', status: 'in_progress' }) },
   });
   const refusedOut = [];
   const refusedCode = await runWriterAdmission({

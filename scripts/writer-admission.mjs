@@ -16,17 +16,15 @@ import { ghApi, repositoryReadEnvironment } from './github-read.mjs';
 // diagnosing a failing writer must not be locked out by the failure of the writer under
 // diagnosis. The caller is the human dispatch only: `beta-e2e.yml` gates both the token mint
 // and this read on `trigger=manual` (all three operations) or on `trigger=release-gate` (a
-// deliberate re-gate; `release-qualify` is its retired spelling, accepted until the dispatcher
-// renames it). The automated dispatches are the writer's own children — `deploy-gate` for the
-// deploy chain's `full`, `deploy-smoke`, and the daily `scheduled` reconcile — and they never
-// reach this read, so a queued foreign writer cannot refuse a starter that runs inside the
-// writer's held run.
+// deliberate re-gate). The automated dispatches are the writer's own children — `deploy-gate`
+// for the deploy chain's `full`, `deploy-smoke`, and the daily `scheduled` reconcile — and they
+// never reach this read, so a queued foreign writer cannot refuse a starter that runs inside
+// the writer's held run.
 //
 // A dispatch that does reach the read and names its own writer run in `dispatched_by` is
 // admitted by the same one comparison, never by a second exemption path: `mutate.yml`'s
-// `e2e-hold` job (formerly `qualify-hold`) holds its `full`, and the scheduled entry's `hold`
-// job holds its `reconcile`. That is why the rule needs no special case for a deploying run's
-// parent.
+// `e2e-hold` job holds its `full`, and the scheduled entry's `hold` job holds its `reconcile`.
+// That is why the rule needs no special case for a deploying run's parent.
 //
 // The read is credential-free for AWS: it mints nothing itself, declares no environment and
 // makes no cloud call. Its only input is one App installation token narrowed to
@@ -53,13 +51,13 @@ export const NONTERMINAL_RUN_STATUSES = Object.freeze([
 // per-workflow fact this read needs, and they are the reviewed contract with the other
 // repository's workflows.
 //
-// #358: `mutate.yml`'s hold job is renamed `qualify-hold` → `e2e-hold` in `AnyWear-Infra`'s
-// step 4, after this repository's rename. The read accepts both names during the transition,
-// because its failure mode is an admission rather than an error: a read that knows only one
-// name would report "no holder" for a run that is still holding the tuple. This issue's step
-// 5 drops the retired name once the writer's rename has merged.
+// #358 renamed `mutate.yml`'s hold job to `e2e-hold` (in `AnyWear-Infra`'s step 4, after this
+// repository's rename). Both names held during that transition; only the current name is
+// accepted now, so a stale writer spelling can no longer mask a holder. The map stays a list of
+// accepted names per workflow because that is the shape the rule reads, and a future rename
+// repeats the same reader-compatibility move.
 export const INFRA_WRITER_HOLD_JOBS = Object.freeze({
-  'mutate.yml': Object.freeze(['qualify-hold', 'e2e-hold']),
+  'mutate.yml': Object.freeze(['e2e-hold']),
   'schedule.yml': Object.freeze(['hold']),
 });
 
@@ -219,8 +217,8 @@ const USAGE = `Usage: node scripts/writer-admission.mjs [--dispatched-by <url>]
 
 Reads the nonterminal AnyWear-Infra writer runs (mutate.yml and the scheduled entry) across
 requested, waiting, pending, queued and in_progress, and admits this qualification unless one
-of them is a foreign run whose hold job (qualify-hold or e2e-hold for mutate.yml, hold for the
-scheduled entry) is nonterminal. It fails open
+of them is a foreign run whose hold job (e2e-hold for mutate.yml, hold for the scheduled entry)
+is nonterminal. It fails open
 with a warning when a list or a run's job list cannot be read, and it refuses by naming the
 holding run and the queued alternative. It makes no AWS call, holds no environment and writes
 nothing.

@@ -18,10 +18,9 @@ run-name: "Beta E2E gate: ${{ inputs.operation }} · ${{ inputs.trigger }} · ${
 # #217, a daily account-reconcile dispatch (`trigger=scheduled`) that #344 moved into
 # `AnyWear-Infra`'s scheduled entry.
 #
-# #358: the trigger values are the gate wording (`deploy-gate`/`release-gate`). Until
-# `AnyWear-Infra`'s step 4 merges and dispatches the new values, this entry accepts the two
-# retired ones (`deploy-qualify`/`release-qualify`) as well; the step that removes them is
-# this issue's step 5, and the input options and the preflight validator move together.
+# #358: the trigger values are the gate wording (`deploy-gate`/`release-gate`). The retired
+# spellings are gone from the input options and from the preflight validator; `AnyWear-Infra`
+# now dispatches the gate values.
 #
 # #217: leftover data is bounded by time, not quarantined, and the manual `recover` exit is
 # removed. The `reconcile` job runs before every gate suite and as its own dispatched
@@ -66,14 +65,11 @@ on:
       trigger:
         # The trigger is evidence, not a permission: the preflight validates the exact
         # combination with the operation and the dispatch inputs.
-        # #358: `deploy-qualify` and `release-qualify` are the retired values. They stay in
-        # this closed set until AnyWear-Infra's step 4 merges and dispatches the gate values;
-        # this issue's step 5 deletes them from here and from the preflight together.
-        description: 'Gate trigger: manual, deploy-smoke (smoke only), deploy-gate (full only), release-gate (full only) or scheduled (reconcile only); deploy-qualify and release-qualify are the retired spellings accepted until the dispatcher renames them'
+        description: 'Gate trigger: manual, deploy-smoke (smoke only), deploy-gate (full only), release-gate (full only) or scheduled (reconcile only)'
         required: false
         default: manual
         type: choice
-        options: [manual, deploy-smoke, deploy-gate, release-gate, scheduled, deploy-qualify, release-qualify]
+        options: [manual, deploy-smoke, deploy-gate, release-gate, scheduled]
       dispatched_by:
         # AnyWear #358: required for every dispatch, because the run name renders it as its
         # fourth segment and `AnyWear-Meta` ADR-0027 §4 pins that name as a machine-read
@@ -209,10 +205,7 @@ jobs:
             exit 1
           fi
           # #180/#358: the dispatch trigger is a closed combination with the operation, the
-          # expected commits, the worker slot offset and the dispatching run URL. The two
-          # retired spellings (`release-qualify`, `deploy-qualify`) are accepted beside the
-          # gate values until AnyWear-Infra's step 4 merges; this issue's step 5 deletes them
-          # from this validator and from the `trigger` input together.
+          # expected commits, the worker slot offset and the dispatching run URL.
           case "$TRIGGER" in
             manual)
               # #358: `manual` carries no trigger-specific rule. It used to refuse a
@@ -233,7 +226,7 @@ jobs:
                 exit 1
               fi
               ;;
-            release-gate|release-qualify)
+            release-gate)
               if [[ "$OPERATION" != full ]]; then
                 echo "::error::trigger $TRIGGER requires operation full (got '$OPERATION')"
                 exit 1
@@ -247,7 +240,7 @@ jobs:
                 exit 1
               fi
               ;;
-            deploy-gate|deploy-qualify)
+            deploy-gate)
               # #226: the deploy chain's gate names the Service commit it deployed. It is the
               # `full` the Infra `e2e-hold` job dispatches, so a dispatch with any other
               # operation, no expected commit or a displaced worker slot is a mistake refused
@@ -331,13 +324,9 @@ jobs:
       # read-only App token for `AnyWear-Infra` (`actions: read` only), declares no
       # `environment` and requests no OIDC permission, so it belongs here, ahead of every
       # credential job.
-      #
-      # #358: `release-qualify` is the retired spelling of `release-gate`. It stays in this
-      # gate until the dispatcher's rename merges, so an operator dispatch under the old value
-      # cannot skip the read and land a gate on a tuple a writer is changing.
       - name: Generate Infra writer read token
         id: infra-writer-token
-        if: inputs.trigger == 'manual' || inputs.trigger == 'release-gate' || inputs.trigger == 'release-qualify'
+        if: inputs.trigger == 'manual' || inputs.trigger == 'release-gate'
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ vars.APP_ID }}
@@ -347,11 +336,11 @@ jobs:
           permission-actions: read
 
       # The admission reads the nonterminal Infra writer runs and refuses only when a
-      # successfully read list names a foreign run whose hold job (`qualify-hold`/`e2e-hold`
-      # for `mutate.yml`, `hold` for the scheduled entry) is nonterminal. An unreadable list
-      # warns and admits, so a failing writer cannot lock the operator out of diagnosing it.
+      # successfully read list names a foreign run whose hold job (`e2e-hold` for `mutate.yml`,
+      # `hold` for the scheduled entry) is nonterminal. An unreadable list warns and admits, so
+      # a failing writer cannot lock the operator out of diagnosing it.
       - name: Admit this gate only when no Infra writer holds the tuple
-        if: inputs.trigger == 'manual' || inputs.trigger == 'release-gate' || inputs.trigger == 'release-qualify'
+        if: inputs.trigger == 'manual' || inputs.trigger == 'release-gate'
         env:
           GH_TOKEN: ${{ steps.infra-writer-token.outputs.token }}
           DISPATCHED_BY: ${{ inputs.dispatched_by }}

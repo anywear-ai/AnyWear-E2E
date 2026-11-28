@@ -172,8 +172,9 @@ test('the removed qualification ledger appears in no non-test module', () => {
     'verifyQualificationForPromotion']) {
     assert.ok(REMOVED_LEDGER_TOKENS.includes(token), `${token} must stay a forbidden ledger token`);
   }
-  // The retired workflow file name is not one of these tokens: `beta-qualification.yml` is the
-  // refusal stub this repository keeps until this issue's step 5, and its name carries no
+  // The retired workflow file name is not one of these tokens. The stub that briefly carried it
+  // is deleted (#358 step 5), so the name is refused by `scripts/entry-census.test.mjs` instead
+  // — and `beta-qualification-` only tokenises the ledger artifacts, whose name carries a
   // trailing hyphen after `qualification`.
   assert.equal(REMOVED_LEDGER_TOKENS.some((token) => token === 'beta-qualification.yml'), false);
 });

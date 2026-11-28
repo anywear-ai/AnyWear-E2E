@@ -1,10 +1,10 @@
 # Account reconcile runbook
 
-The `reconcile` operation of the protected `beta-qualification.yml` entry bounds E2E leftover
-data by time instead of by an operator (#217). It runs as a job before every `qualify` suite
+The `reconcile` operation of the protected `beta-e2e.yml` gate entry bounds E2E leftover
+data by time instead of by an operator (#217). It runs as a job before every gate suite
 and daily through `AnyWear-Infra`'s scheduled entry (`schedule.yml`), which dispatches
 `operation=reconcile` with `trigger=scheduled` through the same protected `workflow_dispatch`
-entry: the execution guard requires that event, so a `schedule` event on the qualify entry
+entry: the execution guard requires that event, so a `schedule` event on the gate entry
 would fail closed. E2E keeps no schedule entry of its own (#344): the daily dispatch has one
 starter, in the writer repository, and the dispatched run is still the E2E run that holds the
 Beta credential.
@@ -51,7 +51,7 @@ rather than truncating.
   authoritative only when it is bound to the protected run: its name's run is the run the
   artifact API reports, that run is on `main`, the artifact and its head repository are this
   repository, and one cached `GET actions/runs/<run>` shows
-  `path: .github/workflows/beta-qualification.yml`, `event: workflow_dispatch`,
+  `path: .github/workflows/beta-e2e.yml` (or the retired pre-#358 path, below), `event: workflow_dispatch`,
   `head_branch: main` and a consistent `head_sha`. A run's conclusion is deliberately not
   required: a failed or cancelled run's manifest is exactly the leftover to read. An unbound
   artifact — including a lifecycle-named artifact whose readable cached run fails the workflow
@@ -59,6 +59,17 @@ rather than truncating.
   lookup that cannot be read at all is a source failure. A bound artifact whose bytes fail the
   digest or archive checks is a source failure too, and so is one whose listing has no
   well-formed `sha256:<64 hex>` digest.
+
+  **The transitional lifecycle binding (#358).** The gate entry was renamed from
+  `beta-qualification.yml` to `beta-e2e.yml`. A lifecycle artifact written before the rename
+  is still inside the seven-day lookback — 90 days for the one migration dispatch — and its
+  run's `path` is still the retired `.github/workflows/beta-qualification.yml`, so
+  `scripts/reconcile-accounts.mjs` accepts **both** paths
+  (`LIFECYCLE_WORKFLOW_PATHS`). Dropping the retired path would silently ignore those
+  artifacts and degrade account attribution to CloudTrail alone. The retired path is the one
+  literal this change keeps in the tree on purpose; a named follow-up change removes it once
+  the lookback window holds no pre-rename artifact.
+
 - **The upload set is closed** — `account-budget.json`, the historical
   `account-budget-oldest-client.json`, `service-cleanup-operation.json` and
   `service-cleanup-run.json`. The smoke artifact carries the first, third and fourth. Every
@@ -73,7 +84,7 @@ rather than truncating.
   the caller and the credential session. A creation for an address with no manifest entry is an
   orphan whose run comes from the session and whose `sub` is read back; a creation recorded
   before run-scoped sessions has no run, and its record names the creation event. The caller is
-  still checked against the qualification role, so the identity is attributable even though the
+  still checked against the gate role, so the identity is attributable even though the
   record's `origin` carries no role field. A creation by any other principal is reported as
   `unattributable_caller` and **never deleted**.
 
@@ -132,11 +143,11 @@ Three conditions are written to the record, warned about, and never fail the rec
 
 | Reason | Condition |
 | --- | --- |
-| `unattributable_caller` | A creation by a principal other than the qualification role; the record also names the caller. |
-| `unprovable_ownership` | A pool-address record with neither a captured subject nor a qualification-role creation event. |
+| `unattributable_caller` | A creation by a principal other than the gate role; the record also names the caller. |
+| `unprovable_ownership` | A pool-address record with neither a captured subject nor a gate-role creation event. |
 | `outside_worker_family` | A manifest record outside the Beta worker families (a retired `ephemeral` or mailbox record). |
 
-None can be resolved by any automatic path this design has, and failing every qualification on
+None can be resolved by any automatic path this design has, and failing every gate run on
 one would reintroduce the operator dependency the issue removes. Every other unresolved reason
 fails the reconcile at the 24-hour bound, and that failure is the alert. A bound breach is what
 fails a run; a reported condition is what warns on it.
@@ -239,12 +250,12 @@ dispatch refuses and starts nothing else, so there is no fourth attempt. The all
 manufactures its own precondition — a migration dispatch that finds the retry absent refuses
 rather than starting it — while generation 0 keeps its ordinary behavior so a scope with no
 execution is still cleaned. The ordinary seven-day reconcile, `full`, `smoke` and the
-qualification teardown leave the allowance unset and keep the unchanged two-name rule.
+gate teardown leave the allowance unset and keep the unchanged two-name rule.
 
 Dispatch it from `main` with:
 
 ```text
-gh workflow run beta-qualification.yml --ref main \
+gh workflow run beta-e2e.yml --ref main \
   -f operation=reconcile -f reconcile_lookback_days=90 -f trigger=manual
 ```
 
@@ -255,7 +266,7 @@ later run's budget, while its own address stays out of the pool — a lease is r
 retained reason — until this operation deletes the identity and the record is written `deleted`.
 `maxNewAccountsPerRun` still counts every attempt, retained or not.
 
-A `full` run whose own cleanup is not verified still withholds the qualification record: the
+A `full` run whose own cleanup is not verified still fails the gate run: the
 teardown gate is unchanged, and a deferred cleanup is never evidence of a verified one.
 
 ## Relationship to the removed `recover` operation
