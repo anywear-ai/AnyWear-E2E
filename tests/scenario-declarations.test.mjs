@@ -14,16 +14,16 @@ import {
 // that contract together: every spec file declares at least one invocation tag on
 // its `test.describe` title, and the deployed invocation scripts in package.json
 // are exactly the ones the inventory document describes. A renamed or removed tag
-// would otherwise drop a scenario out of the release-qualifying selection with
+// would otherwise drop a scenario out of the release-gating selection with
 // nothing left to fail, which is the failure this file exists to prevent.
 //
 // The selection itself is not executed here. A discovery run cannot establish a
 // deployed claim, and an offline file cannot load the deployed environment.
 //
-// The parsers are the qualification record's own: the record states which scenarios
-// the release-gating selection contains, and it is derived from these titles, so a
-// second copy of the parser here could agree with itself and disagree with the
-// record. `scripts/test-selection.mjs` owns them and both callers read them.
+// The parsers are the parser module's own: the selection contract is derived from these
+// titles, so a second copy of the parser here could agree with itself and disagree with
+// the deployed selection. `scripts/test-selection.mjs` owns them and both callers read
+// them.
 
 const inventoryUrl = new URL('../docs/scenario-inventory.md', import.meta.url);
 const packageUrl = new URL('../package.json', import.meta.url);
@@ -87,9 +87,9 @@ test('the documented deployed invocations are exactly the scripts that select th
 // #226: the deploy chain dispatches one `full` per deployment and relies on the
 // release-gating `@regression` selection to carry the smoke evidence inside it. A spec
 // tagged `@smoke` without `@regression` would leave the smoke coverage out of the single
-// release-gating run and out of the qualification record's `test` member, so it fails here
-// rather than during a deployed qualification. This is the `@smoke ⊆ @regression` bound the
-// issue requires; the selection itself stays the spec-level `@regression` superset.
+// release-gating run, so it fails here rather than during a deployed gate run. This is the
+// `@smoke ⊆ @regression` bound the issue requires; the selection itself stays the spec-level
+// `@regression` superset.
 test('every @smoke scenario is also selected by the release-gating @regression selection', async () => {
   const specs = await specDeclarations();
   const smoke = specs.filter(({ tags }) => tags.includes('@smoke'));

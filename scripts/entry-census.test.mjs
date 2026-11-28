@@ -57,10 +57,15 @@ const REMOVED_LEDGER_TOKENS = Object.freeze([
 // .json` no longer exist.
 const GATE_DIAGNOSTICS = 'beta-e2e-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}';
 const GATE_REPORT_PATH = 'test-results/beta-e2e-report.json';
-// The retired workflow file name. #358 renames the entry to `beta-e2e.yml` and leaves this file
-// as a refusal stub until AnyWear-Infra's dispatch rename has merged; this issue's step 5
-// deletes it. It must never carry a job that does work.
-const RETIRED_STUB = 'beta-qualification.yml';
+// The retired workflow file name. #358 renamed the entry to `beta-e2e.yml` and kept this file as
+// a short-lived refusal stub for dispatches that still named it; step 5 of the issue deletes the
+// stub, so the retired name must not exist in the workflow directory at all.
+const RETIRED_ENTRY = 'beta-qualification.yml';
+// The retired dispatch trigger values and the retired Infra hold-job name. Step 5 of #358
+// deletes them from the entry, the validator and the admission gate once `AnyWear-Infra`
+// dispatches the gate values and runs the renamed hold job.
+const RETIRED_TRIGGERS = Object.freeze(['deploy-qualify', 'release-qualify']);
+const RETIRED_HOLD_JOB = 'qualify-hold';
 
 function jobSection(workflow, name) {
   const marker = `\n  ${name}:\n`;
@@ -73,7 +78,6 @@ function jobSection(workflow, name) {
 
 const check = read('check.yml');
 const qualify = read('beta-e2e.yml');
-const stub = read(RETIRED_STUB);
 const job = (name) => jobSection(qualify, name);
 
 // #344: the daily reconcile dispatch moved into `AnyWear-Infra`'s scheduled entry, so this
@@ -125,10 +129,9 @@ function uploadList(section, artifact) {
 test('the deployable unit exposes exactly two entries: one automatic check and one manual gate', () => {
   // #344: the daily account-reconcile dispatch is `AnyWear-Infra`'s scheduled entry now, so
   // this repository has two entries: the automatic check and the manual gate. #358 renames the
-  // manual entry to `beta-e2e.yml` and leaves the retired name as a refusal stub, which is not
-  // an entry: it declares no job that does work. A third real workflow file cannot appear
-  // without failing this census.
-  assert.deepEqual(entries, ['beta-e2e.yml', RETIRED_STUB, 'check.yml']);
+  // manual entry to `beta-e2e.yml` and deletes the retired-name stub, so a third workflow file
+  // cannot appear without failing this census.
+  assert.deepEqual(entries, ['beta-e2e.yml', 'check.yml']);
 
   // The automatic entry absorbs quality and tool-regressions. `quality.yml` carried no path
   // filter, so the workflow-level union is unfiltered and tool-regressions now runs on every
@@ -165,10 +168,9 @@ test('the deployable unit exposes exactly two entries: one automatic check and o
   // #217/#344: `scheduled` is the daily reconcile dispatch from `AnyWear-Infra`'s scheduled
   // entry; it may only ask for the reconcile operation.
   // #226: `deploy-gate` is the deploy chain's gate; it may only ask for full.
-  // #358: the canonical set is the gate wording. `deploy-qualify` and `release-qualify` are the
-  // two retired values, accepted only until AnyWear-Infra's step 4 merges and dispatches the new
-  // ones. This issue's step 5 deletes them from here and from the preflight validator.
-  assert.match(trigger, /options: \[manual, deploy-smoke, deploy-gate, release-gate, scheduled, deploy-qualify, release-qualify\]/);
+  // #358: the canonical set is the gate wording, and the two retired spellings are gone from
+  // both the input menu and the preflight validator.
+  assert.match(trigger, /options: \[manual, deploy-smoke, deploy-gate, release-gate, scheduled\]/);
   const dispatchedBy = inputBlock('dispatched_by');
   assert.match(dispatchedBy, /required: false/);
   assert.match(dispatchedBy, /type: string/);
@@ -211,14 +213,14 @@ test('the gate entry queues its account pool and names each run with the dispatc
   // The deploy chain's trigger is accepted only with its own payload: the full operation, a
   // supplied expected Service commit and worker slot offset 0 (the dispatching Infra run URL
   // is required by the non-manual rule). A smoke or slot-bearing dispatch is refused here,
-  // before the reconcile job or the suite. #358 adds the gate spelling beside the retired one.
-  const deployGate = /^ {12}deploy-gate\|deploy-qualify\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
+  // before the reconcile job or the suite. #358 removed the retired deploy-qualify spelling.
+  const deployGate = /^ {12}deploy-gate\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
   assert.ok(deployGate.length > 0, 'the preflight must validate the deploy-gate trigger');
   assert.match(deployGate, /trigger \$TRIGGER requires operation full/);
   assert.match(deployGate, /trigger \$TRIGGER requires expected_service_commit/);
   assert.match(deployGate, /trigger \$TRIGGER requires worker_slot_offset 0/);
-  // The human re-gate accepts the same retired spelling on the same terms.
-  const releaseGate = /^ {12}release-gate\|release-qualify\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
+  // The human re-gate accepts the same bindings; its retired spelling is gone too.
+  const releaseGate = /^ {12}release-gate\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
   assert.ok(releaseGate.length > 0, 'the preflight must validate the release-gate trigger');
   assert.match(releaseGate, /trigger \$TRIGGER requires operation full/);
   assert.match(releaseGate, /trigger \$TRIGGER requires expected_service_commit/);
@@ -439,9 +441,9 @@ test('the daily reconcile dispatch belongs to AnyWear-Infra and no E2E schedule 
   assert.ok(scheduled.length > 0, 'the preflight must keep the scheduled trigger');
   assert.match(scheduled, /trigger scheduled requires operation reconcile/);
   assert.match(scheduled, /trigger scheduled requires worker_slot_offset 0/);
-  // #358: the retired values stay in the closed set beside the gate values until this issue's
-  // step 5 deletes them from the input and the validator together.
-  assert.match(inputBlock('trigger'), /options: \[manual, deploy-smoke, deploy-gate, release-gate, scheduled, deploy-qualify, release-qualify\]/);
+  // #358: the closed set is the gate wording; the retired spellings are deleted from the input
+  // and the validator together.
+  assert.match(inputBlock('trigger'), /options: \[manual, deploy-smoke, deploy-gate, release-gate, scheduled\]/);
   assert.match(inputBlock('operation'), /options: \[full, smoke, reconcile\]/);
 });
 
@@ -474,21 +476,20 @@ test('the preflight admits a gate through one credential-free outbound writer re
   // queued foreign writer refuse them. Both steps carry the same gate, so an automated dispatch
   // mints no token either.
   //
-  // #358: `release-qualify` is the retired spelling of `release-gate`. It stays in the gate
-  // until the dispatcher's rename merges, because a dispatch that skipped the read would land a
-  // gate on a tuple a writer is changing; this issue's step 5 deletes it.
+  // #358: the retired `release-qualify` spelling is deleted from the gate, so an operator cannot
+  // dispatch a value that skips the read.
   const gate = /^ {8}if: (.+)$/m.exec(admission)?.[1] ?? '';
-  assert.equal(gate, "inputs.trigger == 'manual' || inputs.trigger == 'release-gate' || inputs.trigger == 'release-qualify'",
+  assert.equal(gate, "inputs.trigger == 'manual' || inputs.trigger == 'release-gate'",
     'the admission must be gated on the operator triggers');
   assert.equal(/^ {8}if: (.+)$/m.exec(token)?.[1] ?? '', gate, 'the token mint must carry the admission gate');
 
   const gated = admittedTriggers(gate);
-  assert.deepEqual([...gated].sort(), ['manual', 'release-gate', 'release-qualify'],
+  assert.deepEqual([...gated].sort(), ['manual', 'release-gate'],
     'only the operator dispatch triggers may reach the admission read');
-  // The deploy chain's `full` (`operation=full`, `trigger=deploy-gate`), the deployment smoke,
-  // the daily reconcile and the retired automated spelling are automated: they do not run the
-  // admission, so they cannot be refused by a queued foreign writer.
-  for (const automated of ['deploy-gate', 'deploy-qualify', 'deploy-smoke', 'scheduled']) {
+  // The deploy chain's `full` (`operation=full`, `trigger=deploy-gate`), the deployment smoke and
+  // the daily reconcile are automated: they do not run the admission, so they cannot be refused
+  // by a queued foreign writer.
+  for (const automated of ['deploy-gate', 'deploy-smoke', 'scheduled']) {
     assert.equal(gated.has(automated), false, `trigger ${automated} must skip the admission read`);
   }
 
@@ -595,31 +596,85 @@ test('no workflow or shipped script carries a version ARN or a second reader', (
   assert.equal(existsSync(join(repositoryRoot, 'minimum-supported-client.json')), true);
 });
 
-test('the retired workflow name is a refusal stub, not a gate entry', () => {
-  // #358: the entry is renamed to `beta-e2e.yml`, but `AnyWear-Infra` keeps dispatching the old
-  // file name until its step 4 merges. A dispatch under the old name must land on a run that
-  // fails and says so, not on a 404 that leaves the Infra hold job with no run to observe. The
-  // stub therefore declares the dispatcher's input names (an undeclared input is a 422, so the
-  // dispatch would never reach the refusal) and does nothing else.
-  assert.equal(existsSync(join(directory, RETIRED_STUB)), true,
-    `${RETIRED_STUB} must stay as a refusal stub until this issue's step 5 deletes it`);
-  assert.match(stub, /^ {2}workflow_dispatch:$/m);
-  for (const name of ['operation', 'trigger', 'expected_service_commit', 'expected_client_commit',
-    'worker_slot_offset', 'dispatched_by', 'reconcile_lookback_days']) {
-    assert.match(stub, new RegExp(`^ {6}${name}:$`, 'm'),
-      `${RETIRED_STUB} must declare the ${name} input the dispatcher sends`);
+test('the retired workflow file and the retired dispatch literals are gone', () => {
+  // #358 step 5: the refusal stub, the two retired trigger spellings and the retired Infra
+  // hold-job name were the last transitional literals in this repository. They are deleted once
+  // `AnyWear-Infra` dispatches `deploy-gate`/`release-gate` and runs `e2e-hold`; the census keeps
+  // them deleted, because each one's failure mode is silent: an old-name dispatch would 404, an
+  // old trigger value would be refused at dispatch, and an old hold-job name would make a live
+  // writer invisible to the admission read.
+  assert.equal(existsSync(join(directory, RETIRED_ENTRY)), false,
+    `${RETIRED_ENTRY} must not exist: the entry is beta-e2e.yml and the stub is deleted`);
+  assert.deepEqual(entries.filter((name) => name.includes('beta-qualification')), [],
+    'no workflow file may carry the retired entry name');
+  const sources = entries.map((name) => [name, read(name)]);
+  for (const trigger of RETIRED_TRIGGERS) {
+    assert.equal(qualify.includes(trigger), false, `the gate entry must not name the retired trigger ${trigger}`);
+    for (const [name, source] of sources) {
+      assert.equal(source.includes(trigger), false, `${name} must not carry the retired trigger value ${trigger}`);
+    }
   }
-  // Exactly one job with exactly one step, and that step refuses with a non-zero exit.
-  assert.equal([...stub.matchAll(/^ {2}([a-z][a-z0-9-]*):$/gm)].length, 1, `${RETIRED_STUB} must declare exactly one job`);
-  assert.match(stub, /^ {10}exit 1$/m, `${RETIRED_STUB} must exit non-zero`);
-  assert.match(stub, /renamed to beta-e2e\.yml/, `${RETIRED_STUB} must name the new entry`);
-  // It holds no credential and runs nothing: no action, no environment, no token scope, no
-  // test command.
-  assert.match(stub, /^permissions: \{\}$/m, `${RETIRED_STUB} must request no token scope`);
-  for (const forbidden of [/uses:/, /environment:/, /id-token/, /configure-aws-credentials/, /secrets\./,
-    /pnpm/, /playwright/, /actions\/upload-artifact|actions\/download-artifact/]) {
-    assert.doesNotMatch(stub, forbidden, `${RETIRED_STUB} must hold no credential and run no test (${forbidden})`);
+  for (const [name, source] of sources) {
+    assert.equal(source.includes(RETIRED_HOLD_JOB), false, `${name} must not name the retired Infra hold job ${RETIRED_HOLD_JOB}`);
   }
-  // It is not a ledger either: neither ledger artifact name may appear.
-  for (const token of REMOVED_LEDGER_ARTIFACTS) assert.equal(stub.includes(token), false, `${RETIRED_STUB} must not name ${token}`);
+  // The writer admission shipped script accepts the current name only.
+  const admission = readFileSync(join(repositoryRoot, 'scripts', 'writer-admission.mjs'), 'utf8');
+  assert.equal(admission.includes(RETIRED_HOLD_JOB), false,
+    `scripts/writer-admission.mjs must not accept the retired hold job ${RETIRED_HOLD_JOB}`);
+  assert.match(admission, /'mutate\.yml': Object\.freeze\(\['e2e-hold'\]\)/);
+  assert.match(admission, /'schedule\.yml': Object\.freeze\(\['hold'\]\)/);
+});
+
+test('the docs state gate semantics and carry no retired literal', () => {
+  // #358 step 5 cleans the prose the way it cleaned the code. A doc that still describes the
+  // ledger, the retired trigger values, the retired hold-job name or the old entry file name
+  // sends a reader to a mechanism that no longer exists.
+  const docs = ['AGENTS.md', 'README.md', 'docs/account-reconcile.md', 'docs/scenario-inventory.md'];
+  // The one file allowed to name the retired lifecycle path: it documents the named exception
+  // that keeps pre-rename lifecycle artifacts bound (see the test below).
+  const LIFECYCLE_EXCEPTION = 'docs/account-reconcile.md';
+  const retired = [
+    'qualification-record.json',
+    'anywear_beta_qualification',
+    'verifyQualificationForPromotion',
+    'beta-qualification-',
+    'qualification-environment.mjs',
+    '.qualification-inputs/',
+    'E2E_QUALIFICATION_REPORT',
+    'qualification:generate',
+    'qualification:verify',
+    'qualification:collect',
+    'deploy-qualify',
+    'release-qualify',
+    'qualify-hold',
+  ];
+  for (const path of docs) {
+    const text = readFileSync(join(repositoryRoot, path), 'utf8');
+    for (const token of retired) {
+      assert.equal(text.includes(token), false, `${path} must not carry the retired literal ${token}`);
+    }
+    if (path === LIFECYCLE_EXCEPTION) continue;
+    assert.equal(text.includes('beta-qualification.yml'), false,
+      `${path} must not name the retired workflow file: the entry is beta-e2e.yml`);
+  }
+
+  // The named transitional exception is documented as such, in the one place that keeps it.
+  const reconcileDoc = readFileSync(join(repositoryRoot, LIFECYCLE_EXCEPTION), 'utf8');
+  assert.match(reconcileDoc, /LIFECYCLE_WORKFLOW_PATHS/, 'the exception must name the accepted path set');
+  assert.match(reconcileDoc, /\.github\/workflows\/beta-qualification\.yml/,
+    'the exception must name the retired path it keeps');
+  assert.match(reconcileDoc, /follow-up change removes it/, 'the exception must state its own removal');
+
+  // The gate semantics are stated where a reader looks for the verdict: the run's own
+  // conclusion, no ledger, no cross-repository record lookup.
+  const readme = readFileSync(join(repositoryRoot, 'README.md'), 'utf8');
+  assert.match(readme, /^## Gate verdict$/m);
+  assert.match(readme, /the run's `conclusion`/);
+  assert.match(readme, /no qualification ledger/i);
+  assert.doesNotMatch(readme, /release consumer (?:accepts|downloads)/i);
+
+  // actionlint's one reviewed exception names the current entry and nothing retired.
+  const actionlint = readFileSync(join(repositoryRoot, '.github', 'actionlint.yaml'), 'utf8');
+  assert.match(actionlint, /^ {2}\.github\/workflows\/beta-e2e\.yml:$/m);
+  assert.equal(actionlint.includes('beta-qualification'), false);
 });

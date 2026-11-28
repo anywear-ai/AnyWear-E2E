@@ -32,7 +32,7 @@ and Beta's Cognito IDs. The deployment workflows load the identity IDs from
 `/anywear/beta/cognito_user_pool_id` and `/anywear/beta/cognito_client_id` in SSM.
 Do not commit `.env` or Playwright authentication state.
 
-The deployed qualification profile sets two workers, two active-account slots and six new
+The deployed gate profile sets two workers, two active-account slots and six new
 account leases per run. There is no quarantine budget: a teardown that cannot prove deletion
 records the identity `retained` with a reason and a `reconcileBy` bound, and the `reconcile`
 operation resolves it inside 24 hours (#217). Beta registration is gated by the exact
@@ -42,10 +42,10 @@ leases one of the eight stable worker-pool addresses
 `E2E_WORKER_SLOT_OFFSET` selects the first slot when a slot allocation must avoid one in use.
 The identity is provisioned through the protected AWS admin path, deleted during worker
 teardown, and its lease is released only after the subject is read back deleted. Ordinary
-qualification never mutates the allowlist and needs no real tester mailbox. The retired
+gate runs never mutate the allowlist and need no real tester mailbox. The retired
 synthetic address family and `custom:e2e_bootstrap` marker are no longer written; a historical
 captured identity in either worker family stays deletable.
-The operations of the `qualify` entry share a non-cancelling Beta account-pool
+The operations of the gate entry share a non-cancelling Beta account-pool
 concurrency group. Each run uploads its account-budget manifest, and the `reconcile`
 operation reads the previous seven days of those manifests plus the CloudTrail
 `AdminCreateUser` history to clear a leftover without operator input.
@@ -54,7 +54,7 @@ operation reads the previous seven days of those manifests plus the CloudTrail
 
 ```bash
 pnpm check             # explicit core contracts, lint, typecheck and safe discovery
-pnpm test:core         # the registered offline identity/cleanup/qualification/artifact contracts
+pnpm test:core         # the registered offline identity/cleanup/deployment-evidence/artifact contracts
 pnpm test:tool-regressions # the one retained offline operational-support test file
 pnpm test:deferred-sqs  # two source-only SQS prototype test files; manual #58 review
 pnpm audit             # fail on high/critical dependency advisories
@@ -79,53 +79,53 @@ scenario must satisfy.
 
 | Command | Owner and trigger | Actual effects and evidence |
 | --- | --- | --- |
-| `check` / `test:core` | E2E maintainers; the automatic Check entry (PR/main) and qualify preflight source preparation | Offline fixtures, temporary files/Git repositories, lint, typecheck and discovery; no credentials, cloud calls or deployed result |
+| `check` / `test:core` | E2E maintainers; the automatic Check entry (PR/main) and the gate preflight source preparation | Offline fixtures, temporary files/Git repositories, lint, typecheck and discovery; no credentials, cloud calls or deployed result |
 | `test:tool-regressions` | E2E operational-tool maintainers; the automatic Check entry's `tool-regressions` job on every PR/main | The retained SSE replica-attribution contract: mocked AWS/fetch and temporary files; no AWS/App credentials or live diagnostic proof |
 | `test:deferred-sqs` | Repository maintainer under [#58](https://github.com/git-malu/AnyWear/issues/58); manual future-protocol review only | Two offline ARM/ACK/FIRE prototype files; no live transport, trusted AWS identity or receipt proof, and no #54 acceptance claim |
-| `test:smoke` | E2E maintainers; the `smoke` operation of the protected `qualify` entry | Real login/dashboard/wardrobe navigation using a bounded worker identity and existing cleanup contract; diagnostic only |
-| `test:regression` / `test` | E2E maintainers; the `full` operation's protected Beta qualification suite step, or explicit local investigation | The release-gating business scenarios, including identity creation and cleanup and external VLM/provider work; only this operation and its evidence can qualify a release |
+| `test:smoke` | E2E maintainers; the `smoke` operation of the protected gate entry | Real login/dashboard/wardrobe navigation using a bounded worker identity and existing cleanup contract; diagnostic only |
+| `test:regression` / `test` | E2E maintainers; the `full` operation's protected Beta gate suite step, or explicit local investigation | The release-gating business scenarios, including identity creation and cleanup and external VLM/provider work; only this operation carries the release gate |
 | `test:full-stack` | E2E maintainers; explicit local investigation | Every cross-repository scenario; not a release-gating selection on its own |
 
-The release-gating selection, the smoke diagnostic and automatic leftover expiry are
-separated by the signed `operation` field, not by a workflow boundary, a step or a
-job. One protected dispatch surface, the `qualify` entry in `beta-qualification.yml`, carries
-`full`, `smoke` and `reconcile`. A release consumer accepts a qualification record
-only from the `full` operation of a completed-success qualification run; the record states
-`operation: full` and is produced only by that operation, so a `smoke` or
-`reconcile` run can neither produce nor withhold a record the gate legitimately produced. The
-three properties separation keeps are: the record is produced only by `full`; the record
-binds the operation dispatched, so its producer is uniquely identifiable; and both this
-repository's producer/verifier and the Infra-side executor allow-list check
-`operation == full`. The [scenario inventory](docs/scenario-inventory.md) states which
-verdict each invocation carries.
+The release gate, the smoke diagnostic and automatic leftover expiry are separated by the
+signed `operation` field, not by a workflow boundary, a step or a job. One protected
+dispatch surface, the gate entry in `beta-e2e.yml`, carries `full`, `smoke` and `reconcile`.
+There is no qualification ledger any more (#358): `full`'s own run is the verdict, so the
+release decision is that run's `conclusion`, its run name (operation, trigger, expected
+Service commit and dispatching run) and its `beta-e2e-diagnostics-*` artifact. A `smoke` or
+`reconcile` run can therefore neither produce nor withhold the verdict the `full` run
+carries, and a reconcile result is never substituted for gate evidence. The
+[scenario inventory](docs/scenario-inventory.md) states which verdict each invocation
+carries.
 
-`reconcile` runs twice: as a job before every qualification suite, so a run starts from a
+`reconcile` runs twice: as a job before every gate suite, so a run starts from a
 reconciled environment, and as a daily dispatch of the same protected `workflow_dispatch`
 entry by `AnyWear-Infra`'s scheduled entry (`schedule.yml`, `trigger=scheduled`). That entry
 only dispatches — the execution guard requires `workflow_dispatch`, so a `schedule` event on
-the qualify entry would fail closed — and the dispatched run is what joins the
+the gate entry would fail closed — and the dispatched run is what joins the
 `beta-e2e-account-pool` concurrency group and holds the Beta credential. This repository
 keeps no schedule entry of its own: the daily dispatch has one starter, in the writer
 repository. Its runbook is [docs/account-reconcile.md](docs/account-reconcile.md).
 
-The registered core files retain account-budget, Cognito cleanup, qualification
-record, cleanup operation, wardrobe cleanup, worker cleanup, account reconcile and
+The registered core files retain account-budget, Cognito cleanup, deployment-evidence,
+cleanup operation, wardrobe cleanup, worker cleanup, account reconcile and
 deployed-scenario
-declaration contracts plus the v4 live-tuple contracts: `qualification-record.test.mjs`
-(the live identity, the supported-Client floor and the v4 record), `infra-qualification.test.mjs`
-(this repository's own platform observation, the record's self-containment and its release
-consumer), `service-release.test.mjs` (the immutable Service release identity, the
-four-asset gate, the five-asset transition and the no-asset-read rule), and
+declaration contracts plus the live-tuple contracts: `deployment-evidence.test.mjs`
+(the live identity, the supported-Client floor, the before/after stability check and the
+frozen four asset names), `e2e-environment.test.mjs` (the worker identity capture, its
+comparison and the product-or-environment verdict), `service-release.test.mjs` (the immutable
+Service release identity, the four-asset gate, the five-asset transition and the
+no-asset-read rule), and
 `entry-census.test.mjs`, which asserts the two-entry face, the one manual dispatch surface,
-the credential ordering, the absence of an approval job and the single
-`ENABLE_BETA_MUTATION` name. `test:core` also owns
+the credential ordering, the absence of an approval job, the absence of a `record` job and of
+the retired dispatch literals, and the single `ENABLE_BETA_MUTATION` name. `test:core` also
+owns
 `scripts/reconcile-accounts.test.mjs`, which asserts the reconcile diff, the captured address
 grammar, the seven-day window and 24-hour bound, the closed `anywear_e2e_account_reconcile`
 v1 record and the fail-closed paths offline, without credentials, cloud calls or deployed
 reads. The live-tuple contracts protect the observed
 deployed identity, the supported-Client floor and the immutable release binding; their
-offline assertions remain required by `check` without claiming actual publication or
-qualification.
+offline assertions remain required by `check` without claiming actual publication or a real
+gate run.
 
 The automatic `Check` entry's `tool-regressions` job runs the one retained operational-support
 test file, its implementation and shared evidence/source contracts, and the lockfile.
@@ -145,43 +145,29 @@ Check entry runs the explicitly registered core test files,
 the credential-free tool regressions, lint, type checking, and Playwright test discovery. Client and Service workflows remain responsible for their
 required unit, repository integration, contract, database, and browser integration tests.
 
-The `smoke` operation of the protected `qualify` entry is an on-demand deployed Beta
+The `smoke` operation of the protected gate entry is an on-demand deployed Beta
 diagnostic and runs only the small `@smoke` subset. It reads the live deployed tuple,
 exercises Beta's real identity boundary, re-observes the tuple before it reports, and
-produces no qualification record. It does not run a local database or mutate the deployment.
-Only the `full` operation can issue a passing qualification record.
+carries no gate verdict. It does not run a local database or mutate the deployment.
+Only the `full` operation runs the release-gating suite.
 
-The protected `pnpm test` suite step is reserved for the `full` operation of the `qualify`
+The protected `pnpm test` suite step is reserved for the `full` operation of the gate
 entry, and it runs the release-gating selection. Only a passing `full` run against the live
-tuple it observed before and after the suite produces qualification evidence that Production
+tuple it read before and after the suite gates the deployment that Production
 may consume. The
 [scenario inventory](docs/scenario-inventory.md) records which scenarios that step's
 selection contains; a diagnostic result is not part of it and carries no release
 verdict in either direction.
 
-The qualification record states the selection that produced it instead of a constant. Its
-`test` member names the invocation the suite step ran and the `--grep` tag that invocation
-selects, the SHA-256 digest of the run's own Playwright JSON report, and one entry per
-selected scenario with its outcome and how many of its collected tests were skipped. A
-scenario's `collected` count counts collected test cases, one per case per declared
-Playwright project — a skipped case is still collected and a retried case still counts
-once — so a second project would count each case once per project. `test.result` is `passed`
-unless at least one selected scenario passed only on a retry, which records it as `flaky`; a
-declared skip is recorded in that scenario's own counts and does not change the run result.
-A retry-only pass still issues a record, because a retry is the run-level flake control,
-while the testing policy's admission condition is about a scenario that routinely needs one.
-The suite step writes the report to the path the job declares as
-`E2E_QUALIFICATION_REPORT`, and both the qualification evidence artifact and its
-diagnostics retain the report, so the digest the record states is auditable against the
-bytes it names. Two different verifiers judge that statement. The record verifier a release
-gate calls holds no report: from the checkout it is given it re-derives the invocation, the
-tag and the membership — the spec titles cross-checked against the
-[scenario inventory](docs/scenario-inventory.md) — and refuses a record whose stated
-selection or scenario list disagrees with them. The producer's own verify step, which runs
-in the job before upload, re-derives the per-scenario outcomes, the counts and the digest
-from the report the suite just wrote. A record issued before this change always stays valid,
-because the verifier that judges it is always the one from the record's own producing
-revision; the current verifier does not accept the retired `suite: 'complete'` shape.
+The run keeps its own Playwright JSON report as diagnostics, not as a verdict: the suite
+step writes `test-results/beta-e2e-report.json` (the path the job environment declares as
+`E2E_REPORT_PATH`) and the `beta-e2e-diagnostics-*` artifact retains it beside the live
+identities, the worker-environment captures and the error contexts. Nothing derives a
+pass/fail claim from those bytes — the run's `conclusion` is the verdict — and no other
+repository downloads the artifact. The
+[scenario inventory](docs/scenario-inventory.md) remains the classification contract for the
+selection, and `tests/scenario-declarations.test.mjs` keeps the spec titles and the inventory
+agreeing about every tag; that parser is now its only consumer.
 
 Test classification is explicit: `@smoke` marks the small, stable critical path for the
 on-demand Beta diagnostic; `@regression` marks the scenarios admitted to the
@@ -200,44 +186,43 @@ trigger, so public self-registration is no longer a product surface for the scen
 observe. The [scenario inventory](docs/scenario-inventory.md) records the retirement and its
 replacement coverage.
 
-The manual `Beta Qualification` entry (`qualify`) is the single protected dispatch
+The manual `Beta E2E gate` entry (`beta-e2e.yml`) is the single protected dispatch
 surface, with the required operation menu `full` (release gate), `smoke` (diagnostic) and
 `reconcile` (automatic leftover expiry). Its
 dispatch also carries
 `expected_service_commit` and `expected_client_commit` (`full` only), `trigger` (`manual`,
-`deploy-smoke` for the deployment smoke hook, `deploy-qualify` for the deploy chain's
-qualification, `release-qualify` for a deliberate human re-qualification, `scheduled` for the
+`deploy-smoke` for the deployment smoke hook, `deploy-gate` for the deploy chain's
+gate, `release-gate` for a deliberate human re-gate, `scheduled` for the
 daily reconcile dispatch from `AnyWear-Infra`'s scheduled entry) and
 `dispatched_by` (the dispatching run URL; non-manual triggers only), and the credential-free
-preflight validates that combination before any credential job. For an operator dispatch
-(`trigger=manual`, all three operations, or `trigger=release-qualify`) the preflight also
+preflight validates that combination before any credential job — a retired trigger spelling is
+refused there by name. For an operator dispatch
+(`trigger=manual`, all three operations, or `trigger=release-gate`) the preflight also
 performs the outbound writer admission (#344): it lists the nonterminal `AnyWear-Infra` writer
 runs (`mutate.yml` and the scheduled entry) through a read-only `AnyWear-Infra` App token and
-refuses only when a foreign run's hold job (`qualify-hold` or `hold`) is still nonterminal,
+refuses only when a foreign run's hold job (`e2e-hold` or `hold`) is still nonterminal,
 failing open with a warning when a list cannot be read; a dispatch that names its own writer
 run in `dispatched_by` is admitted by that same comparison. The automated dispatches
-(`deploy-qualify`, `deploy-smoke`, `scheduled`) are started by the writer inside its held run
+(`deploy-gate`, `deploy-smoke`, `scheduled`) are started by the writer inside its held run
 and skip the read, so they cannot be refused by a queued writer. Each run is named
-`Beta qualification: <operation> · <trigger> · <expected Service commit or -> · by <dispatched_by or @actor>`,
-and the release chain finds the qualification record of a Service commit by that name. The `full` operation is the
+`Beta E2E gate: <operation> · <trigger> · <expected Service commit or -> · by <dispatched_by or @actor>`;
+that name is the cross-repository read contract (`AnyWear-Infra` filters its run list by the
+`Beta E2E gate: full` prefix and reads the run's URL back from its own dispatch). The `full` operation is the
 production-readiness gate for an already-deployed Beta environment. It reads the live Client
 `build-metadata.json` and Service `/health`, compares them with the dispatch expectation,
-verifies that the live Service commit resolves to an immutable Service release, takes its own
-authenticated platform observation — the deployed surface discovered through AWS public
-list/describe APIs — runs the release-gating deployed selection (including the
+verifies that the live Service commit resolves to an immutable Service release, runs the
+release-gating deployed selection (including the
 rejection-contract leg that proves the deployed Service refuses a Client below the reviewed
-floor), re-observes and requires an identical tuple, and hands a checksummed v4
-record to the credential-free `record` job, which re-verifies it offline and attaches the
-artifact. A green `full` run whose record `record` has verified and attached is the complete
-release decision; there is no separate approval action or approval Environment, and the audit
-trail is the `qualify` dispatch event (actor and time), the run/attempt and the sealed record
-tuple. A failed, mismatched, or changed deployment, or a worker task
-definition that changed during the suite, cannot issue a passing record. The workflow
-requests 90-day artifact retention, subject to GitHub's configured
-repository or organization ceiling; durable release-ledger storage remains
-out of scope for the initial Production launch. The finite GitHub retention window is an
-accepted trade-off: after the artifact expires, that qualification can no longer authorize a
-new Production deployment or rollback and the candidate must be qualified again. Persistent
+floor), and re-reads both live identities, requiring an identical tuple. A green `full` run
+is the complete
+release decision; there is no separate approval action or approval Environment, no sealed
+record to verify, and the audit
+trail is the `workflow_dispatch` event (actor and time) plus the run object and its
+`beta-e2e-diagnostics-*` artifact. A failed, mismatched, or changed deployment, or a worker task
+definition that changed during the suite, cannot make that run green. The suite runs and the
+diagnostics artifact carry GitHub's artifact retention, subject to its configured
+repository or organization ceiling; nothing outside this run depends on the artifact, so an
+expired artifact loses reader convenience and no gate capability. Persistent
 S3 evidence storage will be reconsidered only if long-term audit or rollback requirements arise.
 
 ## Runtime Reliability Evidence
@@ -248,7 +233,7 @@ The one-time deployed synthetic allowlist acceptance and recovery workflows were
 retired after the feature's acceptance completed. Their historical evidence, including
 the owner's real email-code and normal-login confirmation, is recorded in
 [AnyWear issue #59](https://github.com/git-malu/AnyWear/issues/59). The ordinary
-`full` and `smoke` operations of the `qualify` entry do not mutate tester policy or claim to
+`full` and `smoke` operations of the gate entry do not mutate tester policy or claim to
 verify a real tester mailbox. Future changes to admission behavior should define only the
 focused tests needed for that change; the retired deployed harness is not a standing release gate.
 
@@ -280,39 +265,38 @@ control platform.
 
 The deployed Client must serve the exact reviewed build at an HTTPS URL, support its
 browser routes, and expose `/build-metadata.json`. The Client-owned Beta workflow publishes
-the static build to the Beta PlatformStack's CloudFront distribution. Qualification reads that
+the static build to the Beta PlatformStack's CloudFront distribution. The gate reads that
 endpoint from the workflow constants `E2E_CLIENT_URL` / `E2E_SERVICE_URL` in
-`beta-qualification.yml` (beside `AWS_ACCOUNT_ID` / `AWS_REGION`), so an operator does **not**
-set `BETA_CLIENT_URL` or edit the `beta` environment for a qualification run; those
+`beta-e2e.yml` (beside `AWS_ACCOUNT_ID` / `AWS_REGION`), so an operator does **not**
+set `BETA_CLIENT_URL` or edit the `beta` environment for a gate run; those
 environment-scoped copies are unused by this workflow. If a distribution is recreated, the two
 workflow constants move with it in one reviewed change.
 
 ## CI Model
 
-Qualification reads the live deployed tuple; the committed compatibility pin, its tools and
-its two documents are **deleted** (#192), and no release-qualification path reads a committed
-deployment file: `beta-qualification.yml`, `pnpm check`, `test:core` and `test:list` were
+The gate reads the live deployed tuple; the committed compatibility pin, its tools and
+its two documents are **deleted** (#192), and no gate path reads a committed
+deployment file: `beta-e2e.yml`, `pnpm check`, `test:core` and `test:list` were
 already pin-free. The former measurement workload was the last executed reader of the pin,
 and it was deleted with the sizing apparatus. The last expected-tuple readers were the manual
 drill and recovery CLIs, retired under
 [#213](https://github.com/git-malu/AnyWear/issues/213), so no tracked command reads a
-qualification tuple and no new reader of a committed deployment file may be added.
+deployed tuple and no new reader of a committed deployment file may be added.
 
 The live tuple is:
 
 - the Client at `E2E_CLIENT_URL`: `/build-metadata.json` with `schema_version: 3`,
   `component: 'AnyWear-Client'`, `source_commit`, `client_version` and `built_at`;
 - the Service at `E2E_SERVICE_URL`: `/health` with `status: 'ok'`, `service_commit`,
-  `image_digest` and `minimum_client_version`;
-- the platform content this repository discovers itself (#228): every `AnyWear*` stack in
-  a terminal success status in both observation regions (`ap-east-1` and `us-east-1`),
-  recorded with its region and the sha256 of its raw `Original` template; the whole
-  published `/anywear/beta/` prefix as `{parameter, version, value_sha256}` rows; every
-  `beta-anywear-*` Lambda as `{name, code_sha256, configuration_sha256}`; every
-  `beta-anywear-*` queue (including the DLQs) as
-  `{name, queueVisibilitySeconds, maxReceives}`; and the Client distribution domain.
+  `image_digest` and `minimum_client_version`.
 
-The two endpoints are workflow constants in `beta-qualification.yml` (the same values as the
+#358 removed the third member: the repository's own full-resource platform hash snapshot
+(the platform hash snapshot, #228) existed to seal a run's result into an immutable ledger. The
+platform's stability across the suite is now carried by the two live identity reads and by
+the retained writer/starter mutex, so no committed stage-parameter list or observation region
+list is read on the live path.
+
+The two endpoints are workflow constants in `beta-e2e.yml` (the same values as the
 `beta` environment's `BETA_CLIENT_URL`/`BETA_SERVICE_URL`). They are constants because the
 environment-free `preflight` must read the live tuple before any credential job, and a job
 without `environment: beta` cannot resolve environment-scoped variables. If a distribution is
@@ -338,65 +322,37 @@ and `service-schema.json` — are each uploaded with a non-empty size and a publ
 through the GitHub API and downloads no release asset, so the image digest stays in the live
 `/health` identity and is no longer compared with a release field. No AWS credential is
 requested before that read succeeds. A pre-change five-asset release, which also carries the
-retired `service-artifacts.json` manifest, stays qualifiable during the 5→4 transition: the
+retired `service-artifacts.json` manifest, stays gateable during the 5→4 transition: the
 gate requires the four names it consumes and ignores the extra asset, and it never reads or
 parses the manifest.
 
-## Release qualification record v4
+## Gate verdict
 
-`full` writes `qualification-record.json` schema v4. It is self-contained: reading it answers
-what was deployed, what was expected, what was observed, which tests ran and which run wrote
-it.
+There is no qualification ledger. #358 deleted the v4 record, its producer and verifier, the
+`record` job and the two artifacts a release consumer used to download. What remains is the
+`full` run itself:
 
-| Member | Content |
+| Question the old record answered | Where the answer lives now |
 | --- | --- |
-| `schema_version`, `record_type` | `4`, `anywear_beta_qualification` |
-| `qualification_id`, `result`, `operation`, `qualified_at` | `beta-<run>-<attempt>`, `passed`, `full`, ISO time |
-| `environment` | `beta`, account `650880818323`, region `ap-east-1`, the two endpoints |
-| `expected` | `{service_commit, client_commit, source}`; `source` is `trigger` when the dispatcher supplied a Service commit, `live` when a manual `full` took the live value at run start |
-| `revisions` | `e2e {repository, sha}`, `client {repository, sha, client_version}`, `service {repository, sha, image_digest, minimum_client_version}`; **no `infra`** |
-| `service_artifacts` | `{repository, release_id, tag, target_commit, assets}`; `tag` is `service-artifacts-<service sha>` and `target_commit` is the commit the tag resolved to (the qualified Service commit); `assets` is exactly the four released names, each `{size, digest}` with `digest` a `sha256:<hex>` |
-| `observations` | `{before, after}`; each is `{collected_at, client{url, source_commit, built_at}, service{url, service_commit, image_digest}, platform{stacks, inputs, schema_sha256, lambdas, queues, client_domain}, authenticated: true}` |
-| `test` | the derived selection, the report digest and one outcome per selected scenario |
-| `workflow` | `{repository, path, ref, run_id, run_attempt, run_url, trigger, dispatched_by}` |
-| `integrity` | `{algorithm: 'sha256', payload_sha256}` |
+| What was expected, and from which source? | the run name's third segment (`-` when a manual `full` supplied none) and the dispatch event |
+| Which Client, Service and E2E revisions ran? | the `preflight` step summary and the two live identity reads; the E2E revision is the run's `head_sha` |
+| Which immutable Service release was verified? | the `preflight` step summary's release line, read by `scripts/service-release.mjs` |
+| Did the deployment change during the suite? | `Confirm deployed identities remained stable` fails the run; the worker-environment verdict attributes a red suite |
+| Which tests ran, and how? | `beta-e2e-diagnostics-*` carries `test-results/beta-e2e-report.json` with the raw results and the error contexts |
+| Was the run green? | the run's `conclusion` — the only verdict |
 
-v4 replaces v3's `manifest_asset_id`/`manifest_sha256` with the release's own identity, so no
-record member names a manifest asset and the release gate never reads one. There is no
-`compatibility` and no `deployment` member either: the record consumes no producer record,
-and the observation is this repository's own authenticated platform read
-(`scripts/infra-observation.mjs`), which discovers the deployed surface through AWS public
-list/describe APIs and hashes it with RFC 8785 canonical JSON and sha256 — no producer
-source and no committed name list (#228). The deployment lineage —
-which Infra or Service commit deployed the platform — is a platform fact: the GitHub
-Environment deployment `beta`, the CloudFormation stack events, the Service release
-tag→commit and the ECR image digest. There is no deployment record
-([#207](https://github.com/git-malu/AnyWear/issues/207)); the qualification record proves
-the deployed *content*.
-
-`full` qualifies the tuple from its own two observations, with no cross-run comparison: it
-collects the authenticated deployed tuple before the suite, runs the release-gating
-selection, and collects the same observation again after the suite, refusing any difference
-in Client, Service or platform. The record's two observations must be identical, and the
-`environment` endpoints must match them. The consumer-side drift gate that compared the
-deploy-smoke observation of the same release with the qualification observation was removed
-(#259), because decision D2(c) of
+`full` gates the tuple from its own reads, with no cross-run comparison: it collects the live
+Client and Service identities before the suite, runs the release-gating selection, and reads
+the same observation again after the suite, refusing any difference. The two reads must be
+identical. The consumer-side drift gate that compared the deploy-smoke observation of the same
+release with this run's observation was removed (#259), because decision D2(c) of
 [#226](https://github.com/git-malu/AnyWear/issues/226) dropped the precondition it enforced;
-the credential-free `record` job now verifies only the record, and `smoke` keeps its own
-revision evidence for the operator.
-`verifyQualificationRecord` re-checks the exact v4
-key set, the signed `operation: full`, the expectation and trigger bindings, the observation
-stability and order, the committed floor, the four released asset names and digests, and the
-integrity digest; it refuses a v2 or v3 record, so one schema version never means two
-`service_artifacts` shapes. A release consumer must
-call `verifyQualificationForPromotion` with an authenticated completed-success E2E
-run/attempt, unexpired exact artifact metadata and the attached record bytes/hash; a checksum
-alone does not establish trusted publication.
+`smoke` keeps its own revision evidence for the operator.
 
-The release decision is that green `full` run plus the sealed record: `record` is the last
-qualification job and there is no approval job, approval Environment or `Approved`/`Rejected`
-state. The `qualify` dispatch event (actor and time), the `full` run/attempt and the record
-tuple are the audit trail. A failed run produces no record, so there is nothing to release.
+The release decision is that green `full` run: there is no `record` job, no approval job, no
+approval Environment and no `Approved`/`Rejected` state. The `workflow_dispatch` event (actor
+and time) and the `full` run object are the audit trail. A failed run produces nothing to
+release, and nothing outside this repository keeps a copy of its verdict.
 
 ## Private retrieval and observation
 
@@ -409,34 +365,31 @@ release and its tag ref only and downloads no release asset. `scripts/github-rea
 (`infra-source.mjs`), the recovery owner-artifact reader and the cleanup diagnostic reader
 (`account-recovery-inputs.mjs`, `beta-cleanup-diagnostic.mjs`) are deleted.
 
-AWS credentials are assumed after the live-tuple gate. `beta-e2e-qualification-role` reads
-the discovered surface (#228): `cloudformation list-stacks` in both observation regions with
-`describe-stacks` and `get-template --template-stage Original` per discovered `AnyWear*`
-stack (region parsed from the live stack ARN; every ARN must be in the reviewed account),
-`ssm get-parameters-by-path` over the whole published `/anywear/beta/` prefix (never with
-decryption — a SecureString is refused), `lambda list-functions` and `get-function` for
-every `beta-anywear-*` function (exact ARN/account/region, `Active`, `LastUpdateStatus`
-`Successful`; the stable configuration projection is E2E-owned), `sqs list-queues
---queue-name-prefix beta-anywear` and `get-queue-attributes` for every `beta-anywear-*`
-queue including the DLQs, and `cloudfront list-distributions` to match the distribution
-whose `DomainName` or `Aliases` contains the live Client URL host (exactly one match,
-`Deployed` and enabled). The Runtime identity is bound by the deployed
-Service `/health` and the Client build metadata. The record's `platform.schema_sha256` is
-the sha256 of the RFC 8785 canonical JSON of the discovered `[{parameter, version}]` rows;
-the database/applied schema identity moved to the
-Service release chain with the release slice.
+AWS credentials are assumed after the live-tuple gate. The dedicated
+`beta-e2e-qualification-role` (the name is frozen by #358) still reads what the surviving
+operations need: named SSM parameters (the Cognito user pool and client ids, the tester
+allowlist), the Cognito admin plane for account provisioning and deletion, the wardrobe
+bucket's `s3:GetObject`, the `api`/`worker` log groups, the auto-tagging DLQ receive/visibility
+pair, CloudTrail `LookupEvents` for account attribution, and `cloudformation
+describe-stacks` for `AnyWearRuntimeStack-beta`'s cleanup capability version output
+(`scripts/cleanup-capability.mjs`). #358 removed the full-resource platform hash snapshot, so
+the seven discovery families that existed only for it — list/describe of stacks, templates,
+Lambdas, queues and CloudFront distributions — have no reader here any more. The matching IAM
+narrowing is `AnyWear-Infra`'s source change and takes effect at the next authorized
+`deploy-platform`, not with this repository's merge, so the live role stays wider than that
+source until that deployment runs.
 
 ## Ordinary E2E execution
 
 The former offline cross-repository builder gate was retired with the `selection`
 contract. The Service deploy chain verifies its own sealed artifact before it
-deploys, and qualification independently verifies that the live Service commit resolves to
+deploys, and the gate independently verifies that the live Service commit resolves to
 an immutable `service-artifacts-<sha>` release whose tag resolves to that commit and whose
 four expected assets carry published digests (`scripts/service-release.mjs`), without
 executing the retired Service parser, reading a manifest or downloading a release asset.
 
 Verify that Infra/Client/legacy writers have ceased before allocating an E2E
-qualification window. Repository-local concurrency
+gate window. Repository-local concurrency
 does not serialize those other repositories. Keep `ENABLE_BETA_MUTATION` unset or
 `false` during preparation. For an authorized protected Beta dispatch, set or verify:
 
@@ -466,14 +419,14 @@ whose four assets carry published `sha256:` digests (`scripts/cleanup-source.mjs
 evidence and compares the two pairs before the first account or deletion
 (`scripts/cleanup-source.mjs gate`). A scheduled `reconcile` pins no pair, so a deployment replaced
 while it runs does not refuse the reconciliation; an in-suite `reconcile` inherits the
-qualification's pin and compares. Every refusal is one sentence carrying `unset`, `malformed`,
+gate run's pin and compares. Every refusal is one sentence carrying `unset`, `malformed`,
 `absent` or `drift`, both values, the operation, and the grammar that applied —
 `^[0-9a-f]{40}$` for the commit and `^sha256:[0-9a-f]{64}$` for the digest. The former
 `E2E_CLEANUP_SERVICE_SHA` repository variable is retired: no workflow, script or test reads it, and
 `pnpm check` refuses its reintroduction.
 
 The protected Beta environment, exact repository/owner IDs, main workflow dispatch,
-the single `qualify` entry and the explicitly stated `operation` establish source
+the single gate entry and the explicitly stated `operation` establish source
 identity. `execution-guard.mjs --source-only` checks that identity before credentials,
 including that the operation is one of `full`, `smoke` or `reconcile` and that
 the workflow ref is the entry the operation map names. After
@@ -491,7 +444,7 @@ all local/Actions/CFN/ECS/nested Service jobs have ceased before handing the
 environment to another writer; timeout alone never releases it.
 
 The Infra-owned versioned Step Functions cleanup capability invokes Service's fixed
-application-data task. The ordinary qualification cleanup and the `reconcile` operation
+application-data task. The ordinary gate cleanup and the `reconcile` operation
 submit the same strict normal-mode envelope and enter the same resume/verify/
 retry rule. The Service cleanup deletes the captured users' objects under
 `wearable-items/<sub>/`, `base-photos/<sub>/` and `outfit-generations/<sub>/`, plus the
@@ -537,7 +490,7 @@ unassigned diagnostic `known_message`; those counters alone do not establish
 per-message ownership. Source/image-bound Service validation and live unrelated
 data/message preservation evidence provide that acceptance boundary.
 
-The automatic reconcile and the ordinary qualification cleanup
+The automatic reconcile and the ordinary gate cleanup
 share one rule. For the
 exact captured run scope, the entry point resolves one deterministic execution name,
 `beta-cleanup-<runScope>-<requestHash16>`; an absent generation 0 is started under the
@@ -563,7 +516,7 @@ verified when it is `SUCCEEDED`; when it is itself terminal non-success the disp
 and starts nothing else, so a scope never reaches a fourth execution. The allowance never
 manufactures its own precondition: a migration dispatch that finds the retry absent refuses
 instead of starting it, while generation 0 keeps its ordinary behavior so a scope with no
-execution is still cleaned. The ordinary reconcile, `full`, `smoke` and the qualification
+execution is still cleaned. The ordinary reconcile, `full`, `smoke` and the gate
 teardown leave the allowance unset and keep the two-name rule above.
 
 The original-owner-evidence read and its validators are removed with the manual `recover`
@@ -603,28 +556,27 @@ outstanding executions, tasks and manifests are reconciled before reuse.
 
 ## Environment change during a suite
 
-A qualification can run across a deployment rotation, and the run now says so instead of
+A gate run can span a deployment rotation, and the run now says so instead of
 reporting the platform's recovery as a product failure. The workflow records the
 identity of the worker(s) serving Beta immediately before and immediately after the
 suite - the worker service's task ARN set and the task definition those tasks run - and
-compares them. `scripts/qualification-environment.mjs` reads that identity from the
+compares them. `scripts/e2e-environment.mjs` reads that identity from the
 workflow, which holds the scoped AWS credentials; the Playwright spec reads no AWS and
-decides no environment change, so the qualification-environment module owns the record
+decides no environment change, so the module owns the verdict
 shape and the comparison rules while the spec keeps recording what it observed.
 
-- `.qualification-inputs/beta-environment-before.json` and
-  `.qualification-inputs/beta-environment-after.json` are the two captures; the
+- `.e2e-inputs/beta-environment-before.json` and
+  `.e2e-inputs/beta-environment-after.json` are the two captures; the
   after-capture runs even when the suite failed.
 - `test-results/beta-environment-verdict.json` is the verdict: `environment-changed`,
   `unchanged`, or `unavailable` when an input is missing or malformed, with
   `product_failure_asserted` and the exact worker task ARNs that appeared and
-  disappeared. When the suite passed and `comparison.task_definition_changed` is true,
-  this same verdict is what refuses the qualification.
+  disappeared.
 
 A verdict of `environment-changed` **replaces the product-failure report**: the run
 states that the platform was redeployed under the suite and that no product failure is
 asserted. It does not turn the run green. When the suite failed, the job still ends
-non-success and no qualification record is created. The converse is equally strict: a
+non-success. The converse is equally strict: a
 case that fails while the worker identity is unchanged is still a product failure, and a
 check that could not be established is reported as `unavailable` so the failure keeps
 standing instead of being explained away. An `incomplete` suite - one that was cancelled
@@ -635,21 +587,18 @@ the captures bracket the suite and cannot say when a rotation happened relative 
 interrupted case - so a genuine product failure that coincides with a worker replacement
 is reported as an environment change and must be re-adjudicated by a re-run.
 
-The verdict is a qualification gate on one branch only: the passing path. A suite that
-**passed** while the worker task definition serving Beta changed cannot issue a
-qualification - the record path refuses before it writes `qualification-record.json`, and
-the `Refuse a qualification measured across two worker definitions` step fails the run with
-the same sanitized sentence. The reason for the distinction is what the run measured: a
-suite that spanned two task definitions measured neither of them, while a rotation of task
-ARNs on one unchanged definition leaves the configuration under test intact. That rotation
-is recorded and does not block, so a passing suite on one unchanged definition is still
-qualified, and the reason line says which of the two happened: an added-only change reads as
-a scale-out, not as workers being replaced. Run
+The verdict is attribution evidence, not a gate of its own (#358). Its former blocking
+half refused a verdict for a passing suite measured across two worker task
+definitions; with no record there is no consumer for that refusal. The window it covered is
+now closed by two retained controls: the writer/starter mutex keeps a deployment holding the
+tuple while its gate runs, and `Confirm deployed identities remained stable` fails the run
+when the Client or Service identity moved. A rotation of worker task ARNs on one unchanged
+definition is still recorded and never blocks, and the reason line says which of the two
+happened: an added-only change reads as a scale-out, not as workers being replaced. Run
 [38879938899](https://github.com/git-malu/AnyWear-E2E/actions/runs/38879938899) is that
 rotation - its suite passed, the verdict recorded 2 worker task(s) appeared and none removed
-with the task definition unchanged, and the run still created its qualification record. A
-redeployment that replaces the deployed tuple is still caught separately by
-`Confirm deployed identities remained stable`.
+with the task definition unchanged. A redeployment that replaces the deployed tuple is
+caught separately by `Confirm deployed identities remained stable`.
 
-The capture is unconditional for every qualification run, because a deployment change
-cannot qualify release evidence of any kind.
+The capture is unconditional for every gate run, because a deployment change
+invalidates the run's own evidence of any kind.

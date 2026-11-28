@@ -16,44 +16,41 @@ wrong.
 
 Each invocation below carries its own trigger and its own verdict. The verdicts are
 separated deliberately: a diagnostic result is data about one operation, and it
-can neither satisfy nor fail release qualification.
+can neither satisfy nor fail the release gate.
 
 | invocation | Selects | Trigger | Verdict |
 | --- | --- | --- | --- |
-| `test:smoke` | `@smoke` | The `smoke` operation of the protected `qualify` entry | Diagnostic observation of a narrow deployed path; it does not qualify a release |
-| `test:regression` | `@regression` | The `full` operation of the protected `qualify` entry, as the only release-gating selection | Release qualification: a red result fails the gate, and a green result is a required input to the qualification record |
+| `test:smoke` | `@smoke` | The `smoke` operation of the protected gate entry | Diagnostic observation of a narrow deployed path; it does not gate a release |
+| `test:regression` | `@regression` | The `full` operation of the protected gate entry, as the only release-gating selection | The release gate: a red result fails the run, and a green result is the run's own verdict |
 | `test:full-stack` | `@full-stack`, which every cross-repository scenario carries | Explicit operator selection | Broad deployed cross-boundary observation; not a release-gating selection on its own |
-| `test` | `@regression` | Local investigation, and the `full` operation's qualification suite step | Identical to `test:regression`: the release gate |
-| `test:core` | The explicitly listed offline `scripts/*.test.mjs` contract files and `tests/scenario-declarations.test.mjs` | The automatic Check entry (PR/main) and qualify preflight source preparation | Source contract result; no deployed claim |
+| `test` | `@regression` | Local investigation, and the `full` operation's gate suite step | Identical to `test:regression`: the release gate |
+| `test:core` | The explicitly listed offline `scripts/*.test.mjs` contract files and `tests/scenario-declarations.test.mjs` | The automatic Check entry (PR/main) and the gate preflight source preparation | Source contract result; no deployed claim |
 | `test:tool-regressions` | The explicitly listed offline retained-tool files | The automatic Check entry's `tool-regressions` job on every PR/main | Tool source result; no deployed claim |
 | `test:deferred-sqs` | The explicitly listed prospective SQS protocol files | Manual deferred-owner review | Prototype contract only |
 
 The separation is carried by the signed `operation` field, not by a workflow boundary, a step
-or a job. One protected dispatch surface, the `qualify` entry in `beta-qualification.yml`,
-carries `full`, `smoke` and `reconcile`. A release consumer accepts a qualification
-record only from the `full` operation of a completed-success qualification run: the record
-states `operation: full` and is produced only by that operation, so a `smoke` or
-`reconcile` run can neither produce nor withhold a record the gate legitimately produced. The
-three properties separation keeps are: the record is produced only by `full`; the record binds
-the operation dispatched, so its producer is uniquely identifiable; and both this repository's
-producer/verifier and the Infra-side executor allow-list check `operation == full`.
+or a job. One protected dispatch surface, the gate entry in `beta-e2e.yml`,
+carries `full`, `smoke` and `reconcile`. There is no qualification ledger any more (#358):
+the verdict is the `full` run's own `conclusion`, so a `smoke` or
+`reconcile` run can neither produce nor withhold it, and no artifact is attached for a
+release consumer to read. The two properties separation keeps are: only `full` runs the
+release-gating suite, and `execution-guard.mjs` maps each operation to that one entry, so a
+run cannot be dispatched into an operation it did not state.
 
 Since [#180](https://github.com/git-malu/AnyWear/issues/180) the dispatch surface also names
 the trigger and the expectation it was dispatched for: `trigger=deploy-smoke` only runs
-`smoke`, `trigger=deploy-qualify` only runs `full` and requires `expected_service_commit`,
-`worker_slot_offset=0` and the dispatching run URL, `trigger=release-qualify` only runs `full`
+`smoke`, `trigger=deploy-gate` only runs `full` and requires `expected_service_commit`,
+`worker_slot_offset=0` and the dispatching run URL, `trigger=release-gate` only runs `full`
 and requires `expected_service_commit`, and `trigger=manual` covers re-runs and diagnostics.
 Since [#226](https://github.com/git-malu/AnyWear/issues/226) the deploy chain's `full` uses
-`deploy-qualify`, and `release-qualify` has no workflow producer: it stays the value a person
-dispatches for a deliberate re-qualification. `full` compares the expected Service commit
-with the live `/health` value, writes qualification record v4 from the live observed tuple and
-the immutable Service release identity it verified (the release tag, the commit it resolves to
-and the four released assets with their published digests), and
-the `record` job is the last qualification job: the green `full` run plus its sealed record is
-the release decision, with the dispatch event, the run/attempt and the record tuple as the
-audit trail. No release-qualification path reads a committed compatibility file; the
-qualification path reads `minimum-supported-client.json` as the reviewed Client floor.
-
+`deploy-gate`, and `release-gate` has no workflow producer: it stays the value a person
+dispatches for a deliberate re-gate. `full` compares the expected Service commit
+with the live `/health` value, re-reads the live Client and Service identities after the
+suite, and verifies the immutable Service release identity (the release tag, the commit it
+resolves to and the four released assets with their published digests). The green `full` run
+is the release decision, with the dispatch event (actor and time) and the run object as the
+audit trail. No gate path reads a committed compatibility file; the
+gate path reads `minimum-supported-client.json` as the reviewed Client floor.
 `test:list` and `playwright test --list` discover tests without executing them. Discovery
 reads configuration only, makes no cloud call and asserts no verdict.
 
@@ -83,16 +80,16 @@ compose step produces.
 | Policy class | Full deployed system E2E |
 | Tags | `@regression @full-stack` |
 | Intent | One single-garment virtual try-on completes end to end against the deployed Client and Service: the garment reaches terminal `ready`, it is staged from the Fitting Room's `Wardrobe` area into `To try on` and ticked there, survives a removal and re-add, the base photo is accepted, the generation is accepted with exactly one credit debit, reaches terminal `Complete` with a monotonic state version, returns retrievable image bytes, renders in the Client, and takes no second debit |
-| Current caller | The `full` operation of the protected `qualify` entry, through the release-gating selection. `test:smoke` does not select it |
+| Current caller | The `full` operation of the protected gate entry, through the release-gating selection. `test:smoke` does not select it |
 | Assertion boundary | Deployed Client UI and Service HTTP API together, with the Service's real auto-tagging and VTO provider calls in the path |
 | Actual operation | Leases a synthetic Cognito identity, creates a wardrobe item through the real Client upload flow, opens the default fitting room (`GET /fitting-rooms` creates it, so the scenario creates no room), uploads one base photo through the room's own selector, stages the garment from the `Wardrobe` area with `Add <name> to try on`, ticks it in `To try on` with `Select <name>`, removes it with `Remove <name> from try on` and adds it back, then submits one VTO generation with that garment, polls it to terminal `Complete`, retrieves the generated image, and asserts the Client's rendered result |
 | Owner | AnyWear-E2E maintainers |
 | Lifecycle | Current. It is the only end-to-end coverage of the VTO path; the sizing workload that also exercised it is retired by this issue's separate deletion PR |
 | Command | `pnpm test:regression`, and `pnpm test` because the suite step runs the same selection |
-| Default trigger | The `full` operation of the `qualify` entry, whose selection this scenario is part of |
+| Default trigger | The `full` operation of the gate entry, whose selection this scenario is part of |
 | Cost | External write and paid provider cost: one leased identity, one uploaded garment object, one uploaded base photo, one auto-tagging task and one VTO generation per attempt. Not separately metered |
 | Side effects | Application rows, two uploaded S3 objects, provider spend, and a Cognito identity |
-| Evidence level | Qualification, when the complete selection and the pre/post identity checks pass |
+| Evidence level | Release gate, when the complete selection and the pre/post identity checks pass |
 | Disposition | Retain |
 | Cleanup contract | `DirectTeardown` against the attempt's own `run_scope`/`test_scope`: register before the first business side effect, bind the owner subject, capture the created `wardrobe_item`, `base_photo`, `outfit` and `outfit_generation` as they are created, then call `finalize` with the attempt's own authorization — the only terminal entry point. `finalize` deletes the captured refs in schema order, reads every one of them back (one routed `GET` per reference with a read route, and at most one authenticated `GET /vto/base-photos` covering the captured base photos), and only then writes the single acknowledgement, so the record is computed from the per-reference dispositions `removed | already_absent | absent_unattributed | present | unverified` and only `present`/`unverified` withhold `passed`. Absence decides; a delete `404` is recorded as `already_absent`, never as a deletion. The same `finalize` closes the declaration with a `passed` acknowledgement when nothing was captured, and with a `failed`, quarantined one when the attempt holds no bearer token. Independently of the product assertion, a teardown that is not `passed` retains the scope and fails a separate gate. The worker-lease fixture then deletes the Cognito identity and releases the lease |
 | Verification rationale | The product assertion stands alone; teardown is reported beside it and never rewrites it. The terminal wait is a bound on the platform's 900 s VTO recovery floor, not a measurement of observed provider latency, so the scenario does not report the platform's own recovery as a product failure. `retries: 0` is configured, because each attempt spends real provider budget and a failed attempt must not be repeated automatically. The two-area flow is asserted as two different actions: staging a piece through `Add <name> to try on` must not tick it, the staged row's `Select <name>` is what ticks it (`Deselect <name>` with `aria-pressed="true"` afterwards and `1 / 5` in the counter), and `Remove <name> from try on` must leave the wardrobe's own list intact so the same piece can be staged again. The terminal `Complete`, the image bytes, the single debit and the Client render can only be proven by a deployed run |
@@ -106,16 +103,16 @@ compose step produces.
 | Policy class | Full deployed system E2E |
 | Tags | `@regression @full-stack` |
 | Intent | Composing one item set twice on the render path keeps one outfit for that set: both `POST /vto/generations` answers are `202`, they carry the same `outfit_id` and different `generation_id`s, `GET /outfits` never shows a second outfit for the set, the second attempt appends exactly one `outfit_generations` row to that outfit, and exactly two credits are spent in total |
-| Current caller | The `full` operation of the protected `qualify` entry, through the release-gating selection. `test:smoke` does not select it |
+| Current caller | The `full` operation of the protected gate entry, through the release-gating selection. `test:smoke` does not select it |
 | Assertion boundary | Deployed Client UI and Service HTTP API together, with the Service's real auto-tagging call and its real VTO provider calls in the path |
 | Actual operation | Leases a synthetic Cognito identity, creates one wardrobe item through the real Client upload flow and waits for terminal `ready`, opens the default fitting room, uploads one base photo through the room's own selector, stages the garment from `Wardrobe` and ticks it in `To try on`, then submits the render path twice for that same ticked set and polls both generations to terminal `Complete` |
 | Owner | AnyWear-E2E maintainers |
 | Lifecycle | Current. It is the only deployed coverage of the composition invariant that one item set has one outfit, and it is admitted here because the attempt is issued by the deployed Client's own compose step — the Client decides between the outfit it already knows and a member list of its own — while the outfit, its row count and the credit balance are read back from the Service, so neither end can be replaced by a mock |
 | Command | `pnpm test:regression`, and `pnpm test` because the suite step runs the same selection |
-| Default trigger | The `full` operation of the `qualify` entry, whose selection this scenario is part of |
+| Default trigger | The `full` operation of the gate entry, whose selection this scenario is part of |
 | Cost | External write and paid provider cost: one leased identity, one uploaded garment object, one uploaded base photo, one auto-tagging task and two VTO generations per attempt. Not separately metered |
 | Side effects | Application rows, two uploaded objects, two generated result objects, provider spend, and a Cognito identity |
-| Evidence level | Qualification, when the complete selection and the pre/post identity checks pass |
+| Evidence level | Release gate, when the complete selection and the pre/post identity checks pass |
 | Disposition | Retain |
 | Cleanup contract | The same `DirectTeardown` contract the file's other scenarios declare, against this attempt's own `run_scope`/`test_scope`: register before the first business side effect, bind the owner subject, capture the created `wardrobe_item`, `base_photo`, `outfit` and both `outfit_generation` rows as they are created, then call `finalize` with the attempt's own authorization — the only terminal entry point, which deletes in schema order, reads every reference back and only then writes the single acknowledgement. A teardown that is not `passed` retains the scope and fails a separate gate, and the worker-lease fixture then deletes the Cognito identity and releases the lease |
 | Verification rationale | The product assertion stands alone; teardown is reported beside it and never rewrites it. Both terminal waits reuse the file's recovery-floor bound, so neither wait can report the platform's own recovery as a product failure. The second submit is taken after the Client's primary action is enabled again, which is how the page stops polling the first generation. `generationCount` is read from the `GET /outfits` read model the Wardrobe cards render from, so the scenario states the outfit's own row count without asking for an endpoint the Client never calls. `retries: 0` is configured, because each attempt spends two generations' worth of real provider budget |
@@ -129,16 +126,16 @@ compose step produces.
 | Policy class | Full deployed system E2E |
 | Tags | `@regression @full-stack` |
 | Intent | Turning the compose step's switch off saves the ticked set without rendering it: `POST /outfits` carries only `wearable_item_ids`, answers `201` with the outfit read model whose `latestGeneration` and `look` are both `null` and whose `generationCount` is `0`, a second save answers `200` with the same `id`, no outfit, `outfit_generations` row or credit moves between the two saves, and the Wardrobe card paints the bundled placeholder with `Generate look` instead of the image-unavailable state |
-| Current caller | The `full` operation of the protected `qualify` entry, through the release-gating selection. `test:smoke` does not select it |
+| Current caller | The `full` operation of the protected gate entry, through the release-gating selection. `test:smoke` does not select it |
 | Assertion boundary | Deployed Client UI and Service HTTP API together, with the Service's real auto-tagging call in the path and no VTO call at all |
 | Actual operation | Leases a synthetic Cognito identity, creates one wardrobe item through the real Client upload flow and waits for terminal `ready`, opens the default fitting room, stages the garment from `Wardrobe` and ticks it in `To try on`, switches `Try it on now (1 credit)` off, saves twice, then opens the Wardrobe tab and reads the card, its placeholder and the card's own requests |
 | Owner | AnyWear-E2E maintainers |
 | Lifecycle | Current. It is the only deployed coverage of the path that composes an outfit at no cost, and it is admitted here because the request body and the card are the deployed Client's own output — the switch decides what the primary action is — while the outfit read model, its row count and the credit balance are read back from the Service, so neither end can be replaced by a mock |
 | Command | `pnpm test:regression`, and `pnpm test` because the suite step runs the same selection |
-| Default trigger | The `full` operation of the `qualify` entry, whose selection this scenario is part of |
+| Default trigger | The `full` operation of the gate entry, whose selection this scenario is part of |
 | Cost | External write and paid provider cost bounded to the tagging call: one leased identity, one uploaded garment object and one auto-tagging task per attempt. The save path itself spends no credit, enqueues no generation and writes no image |
 | Side effects | Application rows, one uploaded object, provider spend for the tagging task, and a Cognito identity |
-| Evidence level | Qualification, when the complete selection and the pre/post identity checks pass |
+| Evidence level | Release gate, when the complete selection and the pre/post identity checks pass |
 | Disposition | Retain |
 | Cleanup contract | The same `DirectTeardown` contract the file's other scenarios declare, against this attempt's own `run_scope`/`test_scope`: register before the first business side effect, bind the owner subject, capture the created `wardrobe_item` and `outfit` as they are created, then call `finalize` with the attempt's own authorization — the only terminal entry point, which deletes in schema order (the outfit before the item that its members reference), reads both references back and only then writes the single acknowledgement. A teardown that is not `passed` retains the scope and fails a separate gate, and the worker-lease fixture then deletes the Cognito identity and releases the lease |
 | Verification rationale | The product assertion stands alone; teardown is reported beside it and never rewrites it. The request body is read from the request the Client actually sent, so a render field would fail the scenario rather than be inferred absent from the response. The never-generated state is distinguished from image-unavailable by its own criterion (`latestGeneration == null && look == null` against `look.generationId` set with `look.url == null`), the card is read from the `GET /outfits` list, and the scenario asserts that rendering it issues no single-outfit read and no generated-look object request. Switching the option is asserted not to change the ticks. `retries: 0` is configured, because the attempt still spends a paid auto-tagging call and a failed attempt must not be repeated automatically |
@@ -152,16 +149,16 @@ compose step produces.
 | Policy class | Full deployed system E2E |
 | Tags | `@regression @full-stack` |
 | Intent | A wardrobe item survives the real auto-tagging pipeline: the upload is confirmed idempotently before and after the terminal state, tagging reaches `ready` with a monotonic state version across a reload and a second browser page, the item can be edited, and deletion removes it without disturbing items that pre-date the run. The batch scenario adds two photos in one action through the Add Item dialog and requires both items to appear in the wardrobe list and both to reach terminal `ready` on the page that is already open, with no reload |
-| Current caller | The `full` operation of the protected `qualify` entry, through the release-gating selection. `test:smoke` does not select it |
+| Current caller | The `full` operation of the protected gate entry, through the release-gating selection. `test:smoke` does not select it |
 | Assertion boundary | Deployed Client UI and Service HTTP API together, with the Service's real provider call in the path |
 | Actual operation | Leases a synthetic Cognito identity, signs in through the real Client, presigned-uploads one fixture for the idempotency scenario or two fixtures in a single add action for the batch scenario to S3, creates and mutates wardrobe items, and invokes the external VLM |
 | Owner | AnyWear-E2E maintainers |
 | Lifecycle | Current; retired only with a caller and lifecycle decision per the policy's retention rules |
 | Command | `pnpm test:regression`, and `pnpm test` because the suite step runs the same selection |
-| Default trigger | The `full` operation of the `qualify` entry, whose selection this scenario is part of |
+| Default trigger | The `full` operation of the gate entry, whose selection this scenario is part of |
 | Cost | External write and paid provider cost: one identity, and either one uploaded object and one tagging task (the idempotency scenario) or two uploaded objects and two tagging tasks (the batch scenario) per attempt. Not separately metered |
 | Side effects | Application rows, one or two S3 objects, provider spend, and a Cognito identity |
-| Evidence level | Qualification, when the complete selection and the pre/post identity checks pass |
+| Evidence level | Release gate, when the complete selection and the pre/post identity checks pass |
 | Disposition | Retain |
 | Cleanup contract | `DirectTeardown` against the attempt's own `run_scope`/`test_scope`: register before the first business side effect, bind the owner subject, capture every created `wardrobe_item` as it is confirmed, then call `finalize` with the attempt's own authorization — the only terminal entry point. `finalize` deletes the captured items in schema order, reads each one back with a routed `GET` before writing the single acknowledgement, and computes the record from the per-reference dispositions `removed | already_absent | absent_unattributed | present | unverified`, of which only `present`/`unverified` withhold `passed`; a delete `404` is `already_absent`, never a deletion. The scenarios issue no read-back of their own: the proof precedes the record inside the one call, which also closes the empty-capture and no-token cases. A teardown that is not `passed` retains the scope and fails a separate gate. The worker-lease fixture then deletes the Cognito identity and releases the lease |
 | Verification rationale | The product assertion stands alone; teardown is reported beside it and never rewrites it. A red result means a product defect or a provider failure — the scenarios require a terminal `ready`, so a provider failure cannot pass by the processing indicator disappearing. The batch scenario fails unless both rows leave processing on the open page, asserts the list gained exactly the two confirmed items, and counts document loads so a reload cannot stand in for the live delivery. `retries: 0` is configured, because a failed provider attempt must not be repeated automatically and the reconcile operation owns non-terminal resources |
@@ -180,15 +177,15 @@ compose step produces.
 | Actual operation | Leases a synthetic Cognito identity, signs in through the real Client, navigates, reloads, opens a second page in the same context, signs out, and reads browser storage |
 | Owner | AnyWear-E2E maintainers |
 | Lifecycle | Current |
-| Command | `pnpm test:smoke` for the diagnostic, and `pnpm test:regression` for the qualification |
+| Command | `pnpm test:smoke` for the diagnostic, and `pnpm test:regression` for the gate |
 | Default trigger | The `smoke` operation's dispatch, and the `full` operation |
 | Cost | External write and paid provider cost bounded by one leased identity and no business resource; no provider spend |
 | Side effects | A Cognito identity for the duration of the attempt; in-page observation bindings |
-| Evidence level | Deployed smoke for the diagnostic run; Qualification as part of the complete release selection |
+| Evidence level | Deployed smoke for the diagnostic run; release gate as part of the complete selection |
 | Disposition | Retain |
 | Cleanup contract | Declares `declareNoBusinessCleanup` with `teardownResult: 'passed'`, because the attempt creates no business resource. The worker-lease fixture then deletes the captured Cognito identity, reads back its absence, and releases the lease; the declaration replaces the business-cleanup operation, never the identity cleanup. An undeclared attempt is treated as `partial` and retained rather than released |
 | Verification rationale | The scenario is the stable critical path the smoke invocation requires, and it is the only `@smoke` scenario that exercises session destruction as well as startup. Its retry budget is the workflow default rather than `0`, so a run that only passes on a retry is a flake to investigate, not evidence that its assertion needed the retry |
-| Red result means | A product failure in session startup, restore or logout — or an environment or credential condition. A red smoke run withholds diagnostic confidence but asserts no release verdict by itself; the same red inside the qualification selection fails the release gate |
+| Red result means | A product failure in session startup, restore or logout — or an environment or credential condition. A red smoke run withholds diagnostic confidence but asserts no release verdict by itself; the same red inside the release-gating selection fails the run |
 
 ### `tests/worker-smoke.spec.ts`
 
@@ -203,11 +200,11 @@ compose step produces.
 | Actual operation | Leases a synthetic Cognito identity, signs in through the real Client, observes the first `GET /users/me`, and navigates to two routes. No upload and no provider call |
 | Owner | AnyWear-E2E maintainers |
 | Lifecycle | Current. It exists to observe the profile binding that issue #129 could only read from CloudWatch |
-| Command | `pnpm test:smoke` for the diagnostic, and `pnpm test:regression` for the qualification |
+| Command | `pnpm test:smoke` for the diagnostic, and `pnpm test:regression` for the gate |
 | Default trigger | The `smoke` operation's dispatch, and the `full` operation |
 | Cost | External write bounded by one leased identity; no provider spend |
 | Side effects | A Cognito identity for the duration of the attempt; a retained trace on failure, by an explicit file-scoped `test.use`, because the failed attempt is the evidence |
-| Evidence level | Deployed smoke for the diagnostic run; Qualification as part of the complete release selection |
+| Evidence level | Deployed smoke for the diagnostic run; release gate as part of the complete selection |
 | Disposition | Retain |
 | Cleanup contract | Declares `declareNoBusinessCleanup` with `teardownResult: 'passed'`. The worker-lease fixture deletes the captured Cognito identity, reads back its absence, and releases the lease. Ownership is per attempt: the address is bound to the run scope and slot and is never re-bound |
 | Verification rationale | The binding assertion is the reason the scenario exists and it cannot be established at a lower boundary: the defect it guards against appeared only against the deployed identity boundary. The profile status is attached as evidence for a red run |
@@ -221,16 +218,16 @@ compose step produces.
 | Policy class | Full deployed system E2E |
 | Tags | `@regression` |
 | Intent | The deployed Service enforces its release Client floor on the ordinary request path: a Client below the floor, a headerless request and a malformed header are refused with HTTP 400 `CLIENT_VERSION_UNSUPPORTED` carrying the floor and the parsed header value, a Client at the floor is admitted, and `/health` stays reachable below the floor |
-| Current caller | The `full` operation of the protected `qualify` entry, through the release-gating selection. `test:smoke` does not select it |
+| Current caller | The `full` operation of the protected gate entry, through the release-gating selection. `test:smoke` does not select it |
 | Assertion boundary | Deployed Service HTTP contract only: no Client UI, no identity and no provider call |
 | Actual operation | Reads `E2E_SERVICE_URL`, reads the live floor from the Service's own `/health`, then issues four unauthenticated probes to a non-exempt business route (`GET /users/me`, which answers 401 once admitted) and a second, below-floor `/health` read |
 | Owner | AnyWear-E2E maintainers |
-| Lifecycle | Current. It replaces the deleted oldest-Client qualification leg (#256): the floor is proven through the rejection contract instead of by building and running an old Client |
+| Lifecycle | Current. It replaces the deleted oldest-Client leg (#256): the floor is proven through the rejection contract instead of by building and running an old Client |
 | Command | `pnpm test:regression`, and `pnpm test` because the suite step runs the same selection |
-| Default trigger | The `full` operation of the `qualify` entry, whose selection this scenario is part of |
+| Default trigger | The `full` operation of the gate entry, whose selection this scenario is part of |
 | Cost | No identity, no uploaded object and no provider spend; six HTTP reads per attempt |
 | Side effects | None: read-only probes against the deployed Service |
-| Evidence level | Qualification, when the complete selection and the pre/post identity checks pass |
+| Evidence level | Release gate, when the complete selection and the pre/post identity checks pass |
 | Disposition | Retain |
 | Cleanup contract | None to perform: the bare Playwright `request` fixture creates no Cognito identity, no Service row and no cloud resource, so the scenario registers no teardown and deletes nothing |
 | Verification rationale | The contract is the Service's own middleware behaviour and can only be proven against the deployed floor. The live floor is read in the test body, and a floor below 1 refuses clearly rather than skipping, because `floor - 1` cannot be derived otherwise. `playwright test --list` loads the spec with no E2E environment, so no environment variable is read at module scope |
