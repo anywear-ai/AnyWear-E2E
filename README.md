@@ -91,7 +91,8 @@ signed `operation` field, not by a workflow boundary, a step or a job. One prote
 dispatch surface, the gate entry in `beta-e2e.yml`, carries `full`, `smoke` and `reconcile`.
 There is no qualification ledger any more (#358): `full`'s own run is the verdict, so the
 release decision is that run's `conclusion`, its run name (operation, trigger, expected
-Service commit and dispatching run) and its `beta-e2e-diagnostics-*` artifact. A `smoke` or
+Service commit and the dispatching run URL every dispatch supplies) and its
+`beta-e2e-diagnostics-*` artifact. A `smoke` or
 `reconcile` run can therefore neither produce nor withhold the verdict the `full` run
 carries, and a reconcile result is never substituted for gate evidence. The
 [scenario inventory](docs/scenario-inventory.md) states which verdict each invocation
@@ -194,9 +195,11 @@ dispatch also carries
 `deploy-smoke` for the deployment smoke hook, `deploy-gate` for the deploy chain's
 gate, `release-gate` for a deliberate human re-gate, `scheduled` for the
 daily reconcile dispatch from `AnyWear-Infra`'s scheduled entry) and
-`dispatched_by` (the dispatching run URL; non-manual triggers only), and the credential-free
-preflight validates that combination before any credential job — a retired trigger spelling is
-refused there by name. For an operator dispatch
+`dispatched_by` (the HTTPS URL of the dispatching run; required for **every** dispatch, because
+it is the run name's fourth segment), and the credential-free
+preflight validates that combination before any credential job — a missing or non-HTTPS
+`dispatched_by`, like a retired trigger spelling, is refused there by name. For an operator
+dispatch
 (`trigger=manual`, all three operations, or `trigger=release-gate`) the preflight also
 performs the outbound writer admission (#344): it lists the nonterminal `AnyWear-Infra` writer
 runs (`mutate.yml` and the scheduled entry) through a read-only `AnyWear-Infra` App token and
@@ -205,7 +208,8 @@ failing open with a warning when a list cannot be read; a dispatch that names it
 run in `dispatched_by` is admitted by that same comparison. The automated dispatches
 (`deploy-gate`, `deploy-smoke`, `scheduled`) are started by the writer inside its held run
 and skip the read, so they cannot be refused by a queued writer. Each run is named
-`Beta E2E gate: <operation> · <trigger> · <expected Service commit or -> · by <dispatched_by or @actor>`;
+`Beta E2E gate: <operation> · <trigger> · <expected Service commit or -> · by <dispatched_by>`
+(exactly the shape `AnyWear-Meta` ADR-0027 §4 pins, with no actor fallback);
 that name is the cross-repository read contract (`AnyWear-Infra` filters its run list by the
 `Beta E2E gate: full` prefix and reads the run's URL back from its own dispatch). The `full` operation is the
 production-readiness gate for an already-deployed Beta environment. It reads the live Client

@@ -64,12 +64,12 @@ Run install and build commands from this repository.
   proves the deployed Service refuses a Client below the floor with HTTP 400
   `CLIENT_VERSION_UNSUPPORTED` while admitting one at it. Do not add a committed file that
   describes the deployed revisions; that is what #180 removed.
-- The release gate's verdict is the `full` run itself. `beta-e2e.yml` carries the intended
-  Client, Service and E2E SHAs in its run name and verifies the target environment serves
-  those Client and Service revisions through Client `build-metadata.json` and Service
-  `/health`. The preflight step summary states the live revisions, the image digest, the
-  environment endpoints and the immutable Service release, and the run re-reads both online
-  identities after the suite; a mismatch or a deployment change cannot gate the tuple. The
+- The release gate's verdict is the `full` run itself. Its run name carries the operation, the
+  trigger and the expected Service commit (plus the dispatching run URL, which every dispatch
+  must supply); the `preflight` step summary states the live Client and Service revisions, the
+  image digest, the minimum Client version and the immutable Service release. The run re-reads
+  both online identities after the suite, so a mismatch or a deployment change cannot gate the
+  tuple. The
   audit trail is the `workflow_dispatch` event (actor and time), the run object
   (`conclusion`, `path`, `display_title`) and the `beta-e2e-diagnostics-*` artifact. There
   is no sealed record, no artifact a release consumer downloads and no cross-repository
