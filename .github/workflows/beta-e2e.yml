@@ -8,7 +8,7 @@ name: Beta E2E gate
 # filters its repository run list by the `Beta E2E gate: full` prefix, and its `e2e-hold` job
 # reads this run's URL back from its own dispatch. Keep the ` · ` separators and the four
 # segments exactly as they are.
-run-name: "Beta E2E gate: ${{ inputs.operation }} · ${{ inputs.trigger }} · ${{ inputs.expected_service_commit || '-' }} · by ${{ inputs.dispatched_by || format('@{0}', github.actor) }}"
+run-name: "Beta E2E gate: ${{ inputs.operation }} · ${{ inputs.trigger }} · ${{ inputs.expected_service_commit || '-' }} · by ${{ inputs.dispatched_by }}"
 
 # The E2E deployable unit's single manual entry: the gate. One protected dispatch surface
 # carries three operations — `full` (the release gate), `smoke` (deployed diagnostic) and
@@ -71,8 +71,12 @@ on:
         type: choice
         options: [manual, deploy-smoke, deploy-gate, release-gate, scheduled]
       dispatched_by:
-        description: URL of the run that dispatched this gate; only accepted for a non-manual trigger
-        required: false
+        # AnyWear #358: required for every dispatch, because the run name renders it as its
+        # fourth segment and `AnyWear-Meta` ADR-0027 §4 pins that name as a machine-read
+        # contract. A dispatch without it would render `by ` and produce an unparseable name,
+        # so the preflight refuses it for every trigger instead of falling back to an actor.
+        description: HTTPS URL of the run that dispatched this gate; required for every dispatch because it is part of the run name
+        required: true
         type: string
       worker_slot_offset:
         description: First captured worker slot (each operation allocates two; choose unused slots)
@@ -204,10 +208,9 @@ jobs:
           # expected commits, the worker slot offset and the dispatching run URL.
           case "$TRIGGER" in
             manual)
-              if [[ -n "$DISPATCHED_BY" ]]; then
-                echo "::error::dispatched_by is only accepted for a non-manual trigger"
-                exit 1
-              fi
+              # #358: `manual` carries no trigger-specific rule. It used to refuse a
+              # `dispatched_by`, which the run-name contract now requires from every dispatch;
+              # the URL itself is validated for every trigger below.
               ;;
             deploy-smoke)
               if [[ "$OPERATION" != smoke ]]; then
@@ -242,7 +245,7 @@ jobs:
               # `full` the Infra `e2e-hold` job dispatches, so a dispatch with any other
               # operation, no expected commit or a displaced worker slot is a mistake refused
               # here, before the reconcile job or the suite. The dispatching Infra run URL is
-              # required by the non-manual `dispatched_by` rule below.
+              # required by the `dispatched_by` rule below, like every other trigger.
               if [[ "$OPERATION" != full ]]; then
                 echo "::error::trigger $TRIGGER requires operation full (got '$OPERATION')"
                 exit 1
@@ -276,11 +279,13 @@ jobs:
               exit 1
               ;;
           esac
-          if [[ "$TRIGGER" != manual ]]; then
-            if [[ ! "$DISPATCHED_BY" =~ ^https://[^[:space:]]+$ ]]; then
-              echo "::error::trigger $TRIGGER requires dispatched_by as an HTTPS URL (got '$DISPATCHED_BY')"
-              exit 1
-            fi
+          # #358: every dispatch names the run that dispatched it, because the run name renders
+          # that URL as its fourth segment (ADR-0027 §4) and the operator admission reads it as
+          # its one exemption comparison. A missing or non-HTTPS value is refused here for
+          # every trigger, so the name can never be emitted with an empty segment.
+          if [[ ! "$DISPATCHED_BY" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "::error::trigger $TRIGGER requires dispatched_by as the HTTPS URL of the dispatching run (got '$DISPATCHED_BY')"
+            exit 1
           fi
           # Both expected commits are optional, and only the release-gating operation may
           # compare them with the live deployment.

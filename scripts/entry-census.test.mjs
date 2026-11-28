@@ -172,8 +172,11 @@ test('the deployable unit exposes exactly two entries: one automatic check and o
   // both the input menu and the preflight validator.
   assert.match(trigger, /options: \[manual, deploy-smoke, deploy-gate, release-gate, scheduled\]/);
   const dispatchedBy = inputBlock('dispatched_by');
-  assert.match(dispatchedBy, /required: false/);
+  // #358: required for every dispatch, because the run name renders it as its fourth segment
+  // (ADR-0027 §4). The preflight validates the HTTPS shape for every trigger.
+  assert.match(dispatchedBy, /required: true/);
   assert.match(dispatchedBy, /type: string/);
+  assert.match(dispatchedBy, /part of the run name/);
   // The gate entry reads no committed compatibility file and checks out no producer source:
   // the live tuple comes from the deployed endpoints. #358 removed the repository's own
   // full-resource platform observation with the ledger, so the entry names no snapshot script.
@@ -194,9 +197,10 @@ test('the gate entry queues its account pool and names each run with the dispatc
     'the single beta-e2e-account-pool group must stay non-cancelling and queue its runs');
 
   // #358: the run name is the cross-repository read contract. `AnyWear-Infra`'s
-  // `e2e-admission.mjs` filters the repository run list by the `Beta E2E gate: full` prefix, so
-  // the prefix, the ` · ` separators and the four segments are pinned here. A manual dispatch
-  // renders `-` for a missing expected commit and `@actor` for a missing dispatcher.
+  // `e2e-admission.mjs` filters the repository run list by the `Beta E2E gate: full` prefix, and
+  // `AnyWear-Meta` ADR-0027 §4 pins the whole name, so the prefix, the ` · ` separators and the
+  // four segments are pinned here. A dispatch with no expected commit renders `-`; every
+  // dispatch must carry `dispatched_by`, which is why the name has no actor fallback.
   const runName = /^run-name: (.+)$/m.exec(qualify)?.[1] ?? '';
   assert.ok(runName.length > 0, 'the gate entry must declare a run-name');
   assert.match(runName, /^"Beta E2E gate: /, 'the run name must carry the gate run-name prefix');
@@ -204,10 +208,12 @@ test('the gate entry queues its account pool and names each run with the dispatc
     '${{ inputs.operation }}',
     '${{ inputs.trigger }}',
     "${{ inputs.expected_service_commit || '-' }}",
-    "${{ inputs.dispatched_by || format('@{0}', github.actor) }}",
+    '${{ inputs.dispatched_by }}',
   ]) {
     assert.ok(runName.includes(expression), `the run name must render ${expression}`);
   }
+  assert.doesNotMatch(runName, /github\.actor|format\('/,
+    'the run name must not fall back to the actor: ADR-0027 §4 pins `by <dispatched_by>`');
   assert.equal(runName.split(' · ').length, 4, 'the run name must keep exactly four ` · ` separated segments');
 
   // The deploy chain's trigger is accepted only with its own payload: the full operation, a
