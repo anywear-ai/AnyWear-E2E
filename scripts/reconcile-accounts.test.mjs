@@ -217,7 +217,7 @@ function reconcileArtifactFixture(index, { runId = 124, attempt = 1, createdAt =
       digest: `sha256:${'b'.repeat(64)}`,
       workflow_run: { id: runId, head_branch: headBranch, head_sha: HEAD_SHA, repository_id: E2E_REPOSITORY_ID, head_repository_id: E2E_REPOSITORY_ID } },
     entries,
-    run: { path: '.github/workflows/beta-qualification.yml', event: 'workflow_dispatch', head_branch: 'main', head_sha: HEAD_SHA, ...run },
+    run: { path: '.github/workflows/beta-e2e.yml', event: 'workflow_dispatch', head_branch: 'main', head_sha: HEAD_SHA, ...run },
   };
 }
 
@@ -510,6 +510,11 @@ test('a lifecycle artifact is authoritative only when it is bound to the protect
   for (const path of LIFECYCLE_WORKFLOW_PATHS) {
     assert.deepEqual(lifecycleWorkflowRunBinding({ ...fixture.run, path }, HEAD_SHA), { bound: true }, path);
   }
+  // The retired path is the explicit exception, so it is pinned on its own too: the default
+  // fixtures use the current path, and only this assertion (and the runbook) name the retired
+  // one as still bound.
+  assert.deepEqual(lifecycleWorkflowRunBinding({ ...fixture.run, path: '.github/workflows/beta-qualification.yml' }, HEAD_SHA),
+    { bound: true }, 'a pre-rename lifecycle artifact stays bound (design exception 4)');
   for (const [patch, reason] of [
     [{ path: '.github/workflows/other.yml' }, 'path'],
     [{ event: 'schedule' }, 'event'],
