@@ -108,6 +108,14 @@ function inputBlock(name) {
   return next < 0 ? rest : rest.slice(0, next);
 }
 
+// #363: one `case` branch of the preflight's trigger validator, as its own text, so a
+// per-trigger `dispatched_by` rule is pinned to the trigger that states it.
+function triggerBranch(trigger) {
+  const branch = new RegExp(`^ {12}${trigger}\\)\\n([\\s\\S]*?)^ {14};;$`, 'm').exec(qualify)?.[1] ?? '';
+  assert.ok(branch.length > 0, `the preflight must validate the ${trigger} trigger`);
+  return branch;
+}
+
 // The `path: |` block of one uploaded artifact, as its entries in file order. A list is
 // ordered and complete: an entry added, dropped or reordered fails the pin.
 function uploadList(section, artifact) {
@@ -155,8 +163,8 @@ test('the deployable unit exposes exactly two entries: one automatic check and o
   assert.doesNotMatch(qualify, /sizing_stage/, 'the retired measurement operation carries no dispatch input');
 
   // #180: the live-tuple dispatch surface. The expectation is optional and only `full`
-  // compares it; the trigger is a closed choice; the dispatching run URL is optional and
-  // only accepted for a non-manual trigger.
+  // compares it; the trigger is a closed choice; #363 makes the dispatching run URL present
+  // only on an automation dispatch and refused on a hand dispatch.
   for (const name of ['expected_service_commit', 'expected_client_commit']) {
     const input = inputBlock(name);
     assert.match(input, /required: false/);
@@ -172,11 +180,15 @@ test('the deployable unit exposes exactly two entries: one automatic check and o
   // both the input menu and the preflight validator.
   assert.match(trigger, /options: \[manual, deploy-smoke, deploy-gate, release-gate, scheduled\]/);
   const dispatchedBy = inputBlock('dispatched_by');
-  // #358: required for every dispatch, because the run name renders it as its fourth segment
-  // (ADR-0027 §4). The preflight validates the HTTPS shape for every trigger.
-  assert.match(dispatchedBy, /required: true/);
+  // #363: the field is the dispatching run's HTTPS URL and only that. It is optional and empty
+  // by default, because a hand dispatch has no dispatching run to name; the run name states
+  // `@<actor>` instead. The preflight accepts a non-empty value only from a dispatch an app
+  // identity created.
+  assert.match(dispatchedBy, /required: false/);
+  assert.doesNotMatch(dispatchedBy, /required: true/, 'a hand dispatch must be able to omit dispatched_by');
   assert.match(dispatchedBy, /type: string/);
-  assert.match(dispatchedBy, /part of the run name/);
+  assert.match(dispatchedBy, /default: ''/, 'a dispatch with no dispatching run supplies no value');
+  assert.match(dispatchedBy, /leave empty for a hand dispatch/, 'the description must state that a hand dispatch leaves it empty');
   // The gate entry reads no committed compatibility file and checks out no producer source:
   // the live tuple comes from the deployed endpoints. #358 removed the repository's own
   // full-resource platform observation with the ledger, so the entry names no snapshot script.
@@ -199,8 +211,8 @@ test('the gate entry queues its account pool and names each run with the dispatc
   // #358: the run name is the cross-repository read contract. `AnyWear-Infra`'s
   // `e2e-admission.mjs` filters the repository run list by the `Beta E2E gate: full` prefix, and
   // `AnyWear-Meta` ADR-0027 §4 pins the whole name, so the prefix, the ` · ` separators and the
-  // four segments are pinned here. A dispatch with no expected commit renders `-`; every
-  // dispatch must carry `dispatched_by`, which is why the name has no actor fallback.
+  // four segments are pinned here. A dispatch with no expected commit renders `-`. #363: a hand
+  // dispatch names no dispatching run, so the fourth segment falls back to `@<actor>`.
   const runName = /^run-name: (.+)$/m.exec(qualify)?.[1] ?? '';
   assert.ok(runName.length > 0, 'the gate entry must declare a run-name');
   assert.match(runName, /^"Beta E2E gate: /, 'the run name must carry the gate run-name prefix');
@@ -208,28 +220,69 @@ test('the gate entry queues its account pool and names each run with the dispatc
     '${{ inputs.operation }}',
     '${{ inputs.trigger }}',
     "${{ inputs.expected_service_commit || '-' }}",
-    '${{ inputs.dispatched_by }}',
+    "${{ inputs.dispatched_by || format('@{0}', github.actor) }}",
   ]) {
     assert.ok(runName.includes(expression), `the run name must render ${expression}`);
   }
-  assert.doesNotMatch(runName, /github\.actor|format\('/,
-    'the run name must not fall back to the actor: ADR-0027 §4 pins `by <dispatched_by>`');
+  // The hand-dispatch fallback is required, not merely allowed: a bare `by <dispatched_by>`
+  // would render an empty fourth segment for a `manual` dispatch and break the read contract.
+  assert.ok(runName.includes("by ${{ inputs.dispatched_by || format('@{0}', github.actor) }}"),
+    'the fourth segment must fall back to `@<actor>` when a hand dispatch carries no dispatched_by');
+  assert.doesNotMatch(runName, /by \$\{\{ inputs\.dispatched_by \}\}/,
+    'the run name must not render a bare `by <dispatched_by>` with no actor fallback');
   assert.equal(runName.split(' · ').length, 4, 'the run name must keep exactly four ` · ` separated segments');
 
   // The deploy chain's trigger is accepted only with its own payload: the full operation, a
-  // supplied expected Service commit and worker slot offset 0 (the dispatching Infra run URL
-  // is required by the non-manual rule). A smoke or slot-bearing dispatch is refused here,
-  // before the reconcile job or the suite. #358 removed the retired deploy-qualify spelling.
-  const deployGate = /^ {12}deploy-gate\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
-  assert.ok(deployGate.length > 0, 'the preflight must validate the deploy-gate trigger');
+  // supplied expected Service commit, worker slot offset 0 and, since #363, the dispatching
+  // Infra run URL. A smoke or slot-bearing dispatch is refused here, before the reconcile job
+  // or the suite. #358 removed the retired deploy-qualify spelling.
+  const deployGate = triggerBranch('deploy-gate');
   assert.match(deployGate, /trigger \$TRIGGER requires operation full/);
   assert.match(deployGate, /trigger \$TRIGGER requires expected_service_commit/);
   assert.match(deployGate, /trigger \$TRIGGER requires worker_slot_offset 0/);
-  // The human re-gate accepts the same bindings; its retired spelling is gone too.
-  const releaseGate = /^ {12}release-gate\)\n([\s\S]*?)^ {14};;$/m.exec(qualify)?.[1] ?? '';
-  assert.ok(releaseGate.length > 0, 'the preflight must validate the release-gate trigger');
+  assert.match(deployGate, /requires dispatched_by/, 'the deploy chain is an automation dispatch and names its run');
+  // The human re-gate accepts the same bindings; its retired spelling is gone too. #363: a direct
+  // operator re-gate is a hand dispatch, so it carries no `dispatched_by`.
+  const releaseGate = triggerBranch('release-gate');
   assert.match(releaseGate, /trigger \$TRIGGER requires operation full/);
   assert.match(releaseGate, /trigger \$TRIGGER requires expected_service_commit/);
+  assert.match(releaseGate, /dispatched_by/, 'the direct re-gate branch must state both accepted shapes');
+  assert.doesNotMatch(releaseGate, /requires dispatched_by/, 'a direct operator re-gate carries no dispatched_by');
+});
+
+// #363: `dispatched_by` is the dispatching run's HTTPS URL and only that. A hand dispatch
+// (`manual`, and a direct `release-gate`) has no dispatching run to name, so it carries no
+// value and the run name states `@<actor>`; an automation dispatch requires one; and the
+// shared rule accepts a non-empty value only from a run an app identity created, so no value a
+// person supplies can reach the writer admission's one exemption comparison.
+test('the preflight admits a hand dispatch that names no dispatching run', () => {
+  const manual = triggerBranch('manual');
+  assert.match(manual, /accepts no dispatched_by/, 'a hand dispatch must refuse a dispatched_by');
+  assert.doesNotMatch(manual, /requires dispatched_by/, 'a hand dispatch must not require a dispatching run');
+
+  for (const automation of ['deploy-smoke', 'deploy-gate', 'scheduled']) {
+    const branch = triggerBranch(automation);
+    assert.match(branch, /requires dispatched_by/, `${automation} must require the dispatching run URL`);
+    assert.doesNotMatch(branch, /accepts no dispatched_by/, `${automation} must accept the dispatching run URL`);
+  }
+
+  // The shared rule sits over non-empty values only: the empty value of a hand dispatch never
+  // meets a comparison, which is what makes the writer-admission exemption unforgeable.
+  const scope = stepSection(job('preflight'), 'Validate the dispatch operation, trigger and input scope');
+  assert.match(scope, /DISPATCH_ACTOR: \$\{\{ github\.actor \}\}/, 'the step must name the actor explicitly');
+  assert.match(scope, /DISPATCHED_BY: \$\{\{ inputs\.dispatched_by \}\}/);
+  const guard = scope.indexOf('if [[ -n "$DISPATCHED_BY" ]]; then');
+  const httpsShape = scope.indexOf('^https://[^[:space:]]+$');
+  const appIdentity = scope.indexOf("!= *'[bot]'");
+  assert.ok(guard >= 0, 'the shared rule must apply only to a non-empty dispatched_by');
+  assert.ok(httpsShape > guard, 'the HTTPS shape must be validated inside the non-empty guard');
+  assert.ok(appIdentity > httpsShape,
+    'a non-empty dispatched_by must come from a run an app identity created');
+  assert.match(scope, /accepts dispatched_by only from a run an app identity created/);
+  // The app-identity comparison keeps `[bot]` quoted: unquoted, bash reads it as a glob
+  // character class, so any actor ending in b, o or t would pass.
+  assert.ok(scope.includes(`[[ "$DISPATCH_ACTOR" != *'[bot]' ]]`),
+    'the app-identity comparison must keep [bot] quoted as a literal suffix');
 });
 
 test('the gate chain keeps one credential job per operation and no ledger job', () => {
