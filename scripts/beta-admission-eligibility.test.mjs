@@ -21,7 +21,7 @@ function environment(patch = {}) {
     GITHUB_REPOSITORY_OWNER: 'anywear-ai', GITHUB_REPOSITORY_OWNER_ID: '352675702',
     GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'workflow_dispatch',
     GITHUB_SHA: sourceSha, GITHUB_WORKFLOW_SHA: sourceSha,
-    GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main',
+    GITHUB_WORKFLOW_REF: 'anywear-ai/AnyWear-E2E/.github/workflows/beta-e2e.yml@refs/heads/main',
     GITHUB_RUN_ID: '123456789', GITHUB_RUN_ATTEMPT: '1',
     E2E_STAGE: 'beta', ENABLE_BETA_MUTATION: 'true', E2E_WORKERS: '2', E2E_OPERATION: 'full',
     AWS_ACCOUNT_ID: '650880818323', AWS_REGION: 'ap-east-1', E2E_AWS_ACCOUNT: '650880818323',
@@ -79,13 +79,13 @@ test('the qualification workflow ref is owner-relative across the transfer windo
       GITHUB_REPOSITORY: repository,
       GITHUB_REPOSITORY_OWNER: login,
       GITHUB_REPOSITORY_OWNER_ID: id,
-      GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/beta-qualification.yml@refs/heads/main`,
+      GITHUB_WORKFLOW_REF: `${repository}/.github/workflows/beta-e2e.yml@refs/heads/main`,
     }), { execute: io.execute, sourceSha }), { versions: { tester_allowlist: 7 } }, repository);
   }
   for (const [patch, workflowRef] of [
     [{ GITHUB_REPOSITORY: 'anywear-ai/AnyWear-E2E' }, 'anywear-ai/AnyWear-E2E/.github/workflows/integration.yml@refs/heads/main'],
-    [{ GITHUB_REPOSITORY: 'anywear-ai/AnyWear-E2E' }, 'anywear-ai/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/candidate'],
-    [{ GITHUB_REPOSITORY: 'git-malu/AnyWear-E2E' }, 'anywear-ai/AnyWear-E2E/.github/workflows/beta-qualification.yml@refs/heads/main'],
+    [{ GITHUB_REPOSITORY: 'anywear-ai/AnyWear-E2E' }, 'anywear-ai/AnyWear-E2E/.github/workflows/beta-e2e.yml@refs/heads/candidate'],
+    [{ GITHUB_REPOSITORY: 'git-malu/AnyWear-E2E' }, 'anywear-ai/AnyWear-E2E/.github/workflows/beta-e2e.yml@refs/heads/main'],
   ]) {
     const io = reader();
     assert.throws(() => verifyBetaAdmissionEligibility(environment({ ...patch, GITHUB_WORKFLOW_REF: workflowRef }),
@@ -259,7 +259,7 @@ test('unavailable or malformed CLI JSON produces a bounded diagnostic without ra
 });
 
 test('workflow runs mandatory eligibility after principal verification and before account setup or suite', async () => {
-  const workflow = await readFile(new URL('../.github/workflows/beta-qualification.yml', import.meta.url), 'utf8');
+  const workflow = await readFile(new URL('../.github/workflows/beta-e2e.yml', import.meta.url), 'utf8');
   const steps = workflow.split(/\r?\n {6}- name: /).slice(1);
   // #163: one qualify entry carries the deployed operations. `full` is the release gate and
   // `smoke` is the deployed diagnostic; both lease pool accounts, so both prove the

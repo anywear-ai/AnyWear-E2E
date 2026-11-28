@@ -88,8 +88,8 @@ test('a foreign writer run with a nonterminal hold job refuses by name', async (
   assert.match(result.refusal, /anywear-infra-runtime/);
 });
 
-// The scheduled entry's hold job is `hold`, not `qualify-hold`; the map is the Infra contract
-// and each workflow is judged by its own job name.
+// The scheduled entry's hold job is `hold`, not a `mutate.yml` name; the map is the Infra
+// contract and each workflow is judged by its own job names.
 test('the scheduled entry holds through its hold job', async () => {
   const holder = 203;
   const read = reader({
@@ -101,6 +101,34 @@ test('the scheduled entry holds through its hold job', async () => {
   assert.equal(result.admitted, false);
   assert.equal(result.holder.holdJob, 'hold');
   assert.ok(result.refusal.includes(runUrl(holder)));
+});
+
+// #358: `AnyWear-Infra` renames `mutate.yml`'s hold job `qualify-hold` → `e2e-hold` in its
+// step 4, after this repository's workflow rename. During the transition both names hold: a
+// read that knew only one of them would report "no holder" for a run that is still holding the
+// tuple, which is the one failure this module exists to prevent.
+test('both the current and the retired mutate.yml hold-job names hold', async () => {
+  assert.deepEqual({ ...INFRA_WRITER_HOLD_JOBS }, {
+    'mutate.yml': ['qualify-hold', 'e2e-hold'],
+    'schedule.yml': ['hold'],
+  });
+  for (const name of ['qualify-hold', 'e2e-hold']) {
+    const holder = name === 'qualify-hold' ? 204 : 205;
+    const read = reader({
+      runs: { [runsPath('mutate.yml', 'in_progress')]: runList(runEntry(holder)) },
+      jobs: { [jobsPath(holder)]: jobList({ name, status: 'in_progress' }) },
+    });
+    const result = await evaluateWriterAdmission({ dispatchedBy: runUrl(101), run: read });
+    assert.equal(result.admitted, false, `${name} must hold`);
+    assert.equal(result.holder.holdJob, name);
+    assert.match(result.refusal, new RegExp(`its ${name} job is "in_progress"`));
+    // The same job name only holds while it is nonterminal.
+    assert.equal(holdingJob([{ name, status: 'completed' }], INFRA_WRITER_HOLD_JOBS['mutate.yml']), null);
+    assert.equal(holdingJob([{ name: 'deploy', status: 'in_progress' }], INFRA_WRITER_HOLD_JOBS['mutate.yml']), null);
+  }
+  // The scheduled entry's job name is unchanged and is judged by its own list.
+  assert.equal(holdingJob([{ name: 'hold', status: 'in_progress' }], INFRA_WRITER_HOLD_JOBS['schedule.yml']).name, 'hold');
+  assert.equal(holdingJob([{ name: 'e2e-hold', status: 'in_progress' }], INFRA_WRITER_HOLD_JOBS['schedule.yml']), null);
 });
 
 // (c) A nonterminal writer run whose hold job already completed, or that never created one,
@@ -157,7 +185,12 @@ test('an unreadable run list or job list warns and admits', async () => {
 // writer workflows, one request per pair.
 test('the read queries exactly the five nonterminal statuses and both writer workflows', async () => {
   assert.deepEqual([...NONTERMINAL_RUN_STATUSES], ['requested', 'waiting', 'pending', 'queued', 'in_progress']);
-  assert.deepEqual({ ...INFRA_WRITER_HOLD_JOBS }, { 'mutate.yml': 'qualify-hold', 'schedule.yml': 'hold' });
+  // #358: `mutate.yml` accepts both hold-job names during the transition, `schedule.yml` keeps
+  // `hold`.
+  assert.deepEqual({ ...INFRA_WRITER_HOLD_JOBS }, {
+    'mutate.yml': ['qualify-hold', 'e2e-hold'],
+    'schedule.yml': ['hold'],
+  });
 
   const read = reader();
   const result = await evaluateWriterAdmission({ run: read });

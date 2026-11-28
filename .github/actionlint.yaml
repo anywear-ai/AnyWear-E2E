@@ -1,7 +1,10 @@
 # actionlint configuration. The check itself is a workflow step in
 # `.github/workflows/check.yml`; this file only records reviewed false positives.
 paths:
-  .github/workflows/beta-qualification.yml:
+  # AnyWear #358 renamed the gate entry from `beta-qualification.yml` to `beta-e2e.yml`; the
+  # ignore moves with the file. The retired name now holds a refusal stub that declares no
+  # `concurrency` block, so it needs no entry of its own.
+  .github/workflows/beta-e2e.yml:
     ignore:
       # actionlint 1.7.12 bundles a workflow schema captured before GitHub Actions
       # accepted the `concurrency.queue` key (`queue: max` queues up to 100 pending

@@ -931,7 +931,7 @@ test('the removed original-evidence compatibility read is no longer consulted', 
 test('the dispatch surface no longer declares the manual recovery entry', async () => {
   const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.ok(packageJson.scripts['test:core'].includes('scripts/service-cleanup-operation.test.mjs'));
-  const workflow = await readFile(new URL('../.github/workflows/beta-qualification.yml', import.meta.url), 'utf8');
+  const workflow = await readFile(new URL('../.github/workflows/beta-e2e.yml', import.meta.url), 'utf8');
   // #217: the manual `recover` operation, its captured-identity inputs and its original-
   // evidence replay are removed; only `full`, `smoke` and `reconcile` remain.
   assert.doesNotMatch(workflow, /^ {2}recover:$/m, 'the qualify entry must not declare a recover job');
@@ -947,7 +947,7 @@ test('the dispatch surface no longer declares the manual recovery entry', async 
 
 test('the replay chain leaves no tracked production reference or callerless entry behind', () => {
   const production = ['tests/support/service-cleanup-operation.ts', 'scripts/cleanup-worker-accounts.mjs',
-    '.github/workflows/beta-qualification.yml'];
+    '.github/workflows/beta-e2e.yml'];
   for (const file of production) {
     const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
     for (const removed of ['beta-cleanup-recovery-', 'assertPreviousRecovery', 'assertRecoveryOperationEvidence',

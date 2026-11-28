@@ -14,17 +14,19 @@ import { ghApi, repositoryReadEnvironment } from './github-read.mjs';
 //
 // Everything else admits, and an unreadable list records a warning and admits: an operator
 // diagnosing a failing writer must not be locked out by the failure of the writer under
-// diagnosis. The caller is the human dispatch only: `beta-qualification.yml` gates both the
-// token mint and this read on `trigger=manual` (all three operations) or on
-// `trigger=release-qualify` (a deliberate re-qualification). The automated dispatches are the
-// writer's own children — `deploy-qualify` for the deploy chain's `full`, `deploy-smoke`, and
-// the daily `scheduled` reconcile — and they never reach this read, so a queued foreign writer
-// cannot refuse a starter that runs inside the writer's held run.
+// diagnosis. The caller is the human dispatch only: `beta-e2e.yml` gates both the token mint
+// and this read on `trigger=manual` (all three operations) or on `trigger=release-gate` (a
+// deliberate re-gate; `release-qualify` is its retired spelling, accepted until the dispatcher
+// renames it). The automated dispatches are the writer's own children — `deploy-gate` for the
+// deploy chain's `full`, `deploy-smoke`, and the daily `scheduled` reconcile — and they never
+// reach this read, so a queued foreign writer cannot refuse a starter that runs inside the
+// writer's held run.
 //
 // A dispatch that does reach the read and names its own writer run in `dispatched_by` is
 // admitted by the same one comparison, never by a second exemption path: `mutate.yml`'s
-// `qualify-hold` job holds its `full`, and the scheduled entry's `hold` job holds its
-// `reconcile`. That is why the rule needs no special case for a deploying run's parent.
+// `e2e-hold` job (formerly `qualify-hold`) holds its `full`, and the scheduled entry's `hold`
+// job holds its `reconcile`. That is why the rule needs no special case for a deploying run's
+// parent.
 //
 // The read is credential-free for AWS: it mints nothing itself, declares no environment and
 // makes no cloud call. Its only input is one App installation token narrowed to
@@ -46,13 +48,19 @@ export const NONTERMINAL_RUN_STATUSES = Object.freeze([
   'in_progress',
 ]);
 
-// The Infra hold-job contract (§7 of ADR-0033). A writer run holds the served tuple while its
-// hold job exists and that job has not reached `completed`. The job name is the only
-// per-workflow fact this read needs, and it is the reviewed contract with the other
+// The Infra hold-job contract (§7 of ADR-0033). A writer run holds the served tuple while one
+// of its hold jobs exists and that job has not reached `completed`. The job names are the only
+// per-workflow fact this read needs, and they are the reviewed contract with the other
 // repository's workflows.
+//
+// #358: `mutate.yml`'s hold job is renamed `qualify-hold` → `e2e-hold` in `AnyWear-Infra`'s
+// step 4, after this repository's rename. The read accepts both names during the transition,
+// because its failure mode is an admission rather than an error: a read that knows only one
+// name would report "no holder" for a run that is still holding the tuple. This issue's step
+// 5 drops the retired name once the writer's rename has merged.
 export const INFRA_WRITER_HOLD_JOBS = Object.freeze({
-  'mutate.yml': 'qualify-hold',
-  'schedule.yml': 'hold',
+  'mutate.yml': Object.freeze(['qualify-hold', 'e2e-hold']),
+  'schedule.yml': Object.freeze(['hold']),
 });
 
 export const RUN_PAGE_SIZE = 100;
@@ -115,7 +123,7 @@ export function parseWriterRuns(bytes, workflow) {
     if (entry.path !== `${WORKFLOW_DIRECTORY}/${workflow}`) {
       throw new Error(`The run ${fromUrl.url} belongs to ${describe(entry.path)}, not ${workflow}`);
     }
-    return { id, url: fromUrl.url, workflow, holdJob: INFRA_WRITER_HOLD_JOBS[workflow] };
+    return { id, url: fromUrl.url, workflow, holdJobs: [...INFRA_WRITER_HOLD_JOBS[workflow]] };
   });
 }
 
@@ -127,11 +135,14 @@ export function parseWriterJobs(bytes, run) {
   return payload.jobs;
 }
 
-// The hold rule itself: the named job exists and has not reached a terminal state. A job the
-// run never created, and a job that already completed, both stop holding.
-export function holdingJob(jobs, holdJob) {
+// The hold rule itself: one of the workflow's accepted hold jobs exists and has not reached a
+// terminal state. A job the run never created, and a job that already completed, both stop
+// holding. `holdJobs` is one name or a list of accepted names, which is how the transition
+// admits both the current and the retired spelling of a renamed job.
+export function holdingJob(jobs, holdJobs) {
   if (!Array.isArray(jobs)) throw new Error('An AnyWear-Infra writer run job list must be a list');
-  return jobs.filter((job) => job && typeof job === 'object' && !Array.isArray(job) && job.name === holdJob)
+  const accepted = Array.isArray(holdJobs) ? holdJobs : [holdJobs];
+  return jobs.filter((job) => job && typeof job === 'object' && !Array.isArray(job) && accepted.includes(job.name))
     .find((job) => job.status !== TERMINAL_JOB_STATUS) ?? null;
 }
 
@@ -172,7 +183,7 @@ export async function evaluateWriterAdmission({ dispatchedBy = '', environment =
   }
 
   const examined = new Set();
-  for (const [workflow, holdJob] of Object.entries(INFRA_WRITER_HOLD_JOBS)) {
+  for (const [workflow, holdJobs] of Object.entries(INFRA_WRITER_HOLD_JOBS)) {
     for (const status of NONTERMINAL_RUN_STATUSES) {
       let runs;
       try {
@@ -193,9 +204,9 @@ export async function evaluateWriterAdmission({ dispatchedBy = '', environment =
           record(`${candidate.url} job list could not be read (${readFailure(error)}); treating it as not holding`);
           continue;
         }
-        const hold = holdingJob(jobs, holdJob);
+        const hold = holdingJob(jobs, holdJobs);
         if (hold) {
-          const holder = { url: candidate.url, workflow, holdJob, holdStatus: hold.status };
+          const holder = { url: candidate.url, workflow, holdJob: hold.name, holdStatus: hold.status };
           return { admitted: false, warnings, holder, refusal: writerRefusal(holder) };
         }
       }
@@ -208,7 +219,8 @@ const USAGE = `Usage: node scripts/writer-admission.mjs [--dispatched-by <url>]
 
 Reads the nonterminal AnyWear-Infra writer runs (mutate.yml and the scheduled entry) across
 requested, waiting, pending, queued and in_progress, and admits this qualification unless one
-of them is a foreign run whose hold job (qualify-hold or hold) is nonterminal. It fails open
+of them is a foreign run whose hold job (qualify-hold or e2e-hold for mutate.yml, hold for the
+scheduled entry) is nonterminal. It fails open
 with a warning when a list or a run's job list cannot be read, and it refuses by naming the
 holding run and the queued alternative. It makes no AWS call, holds no environment and writes
 nothing.
